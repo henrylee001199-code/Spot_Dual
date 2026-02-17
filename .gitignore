@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+
+# Build outputs
+bin/
+dist/
+*.exe
+*.out
+
+# Go cache / coverage
+.gocache/
+*.test
+coverage.out
+
+# Local runtime artifacts
+state/
+tmp_scan_cfg/
+.tmp/
+
+# Large/local datasets
+data/
+
+# Local env / editor files
+.env
+.env.*
+.idea/
+*.iml
