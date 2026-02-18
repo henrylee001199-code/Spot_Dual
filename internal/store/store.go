@@ -30,7 +30,6 @@ type GridState struct {
 	Rules          core.Rules      `json:"rules"`
 	Initialized    bool            `json:"initialized"`
 	Stopped        bool            `json:"stopped"`
-	Regime         string          `json:"regime,omitempty"`
 	UpdatedAt      time.Time       `json:"updated_at"`
 }
 

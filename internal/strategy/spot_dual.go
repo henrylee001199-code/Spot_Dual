@@ -3,7 +3,6 @@ package strategy
 import (
 	"context"
 	"errors"
-	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,9 +43,6 @@ type SpotDual struct {
 	maxLevel    int
 	stopped     bool
 	ignoreFills map[string]struct{}
-	regimeCfg   RegimeControlConfig
-	regimeState RegimeState
-	regime      *regimeDetector
 }
 
 func NewSpotDual(symbol string, stopPrice, ratio decimal.Decimal, levels, shift int, qty decimal.Decimal, minQtyMultiple int64, rules core.Rules, store store.Persister, executor OrderExecutor) *SpotDual {
@@ -64,7 +60,6 @@ func NewSpotDual(symbol string, stopPrice, ratio decimal.Decimal, levels, shift 
 		openOrders:     make(map[string]core.Order),
 		store:          store,
 		ignoreFills:    make(map[string]struct{}),
-		regimeState:    RegimeRange,
 	}
 }
 
@@ -108,18 +103,6 @@ func (s *SpotDual) SetSellRatio(ratio decimal.Decimal) {
 	}
 }
 
-func (s *SpotDual) SetRegimeControl(cfg RegimeControlConfig) {
-	cfg = normalizeRegimeConfig(cfg)
-	s.regimeCfg = cfg
-	if !cfg.Enabled {
-		s.regime = nil
-		s.regimeState = RegimeRange
-		return
-	}
-	s.regime = newRegimeDetector(cfg)
-	s.regimeState = RegimeRange
-}
-
 func (s *SpotDual) Init(ctx context.Context, price decimal.Decimal) error {
 	if s.stopped {
 		return ErrStopped
@@ -142,7 +125,6 @@ func (s *SpotDual) Init(ctx context.Context, price decimal.Decimal) error {
 	if s.SellRatio.Cmp(decimal.NewFromInt(1)) <= 0 {
 		return errors.New("sell_ratio must be > 1")
 	}
-	s.updateRegime(price)
 	if s.anchor.Cmp(decimal.Zero) <= 0 {
 		s.anchor = price
 	}
@@ -359,25 +341,6 @@ func (s *SpotDual) OnTick(ctx context.Context, price decimal.Decimal, at time.Ti
 	if s.minLevel == 0 && s.maxLevel <= s.Levels {
 		s.minLevel = -s.Levels
 	}
-	regimeChanged := s.updateRegimeAt(price, at)
-	if !regimeChanged {
-		return nil
-	}
-	if err := s.rebuildOrders(ctx, price); err != nil {
-		s.alertImportant("regime_rebuild_failed", map[string]string{
-			"regime": string(s.regimeState),
-			"err":    err.Error(),
-		})
-		_ = s.persistSnapshot()
-		return err
-	}
-	s.initialized = true
-	if err := s.persistSnapshot(); err != nil {
-		s.alertImportant("reconcile_persist_failed", map[string]string{
-			"err": err.Error(),
-		})
-		return err
-	}
 	return nil
 }
 
@@ -403,32 +366,6 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 	}
 	if s.minLevel == 0 && s.maxLevel <= s.Levels {
 		s.minLevel = -s.Levels
-	}
-	regimeChanged := s.updateRegime(price)
-	if regimeChanged {
-		s.openOrders = make(map[string]core.Order, len(openOrders))
-		for _, ord := range openOrders {
-			if ord.ID == "" {
-				continue
-			}
-			s.openOrders[ord.ID] = ord
-		}
-		if err := s.rebuildOrders(ctx, price); err != nil {
-			s.alertImportant("regime_rebuild_failed", map[string]string{
-				"regime": string(s.regimeState),
-				"err":    err.Error(),
-			})
-			_ = s.persistSnapshot()
-			return err
-		}
-		s.initialized = true
-		if err := s.persistSnapshot(); err != nil {
-			s.alertImportant("reconcile_persist_failed", map[string]string{
-				"err": err.Error(),
-			})
-			return err
-		}
-		return nil
 	}
 
 	s.openOrders = make(map[string]core.Order)
@@ -513,26 +450,6 @@ func (s *SpotDual) orderQty() decimal.Decimal {
 	return qty
 }
 
-func (s *SpotDual) orderQtyForSide(side core.Side) decimal.Decimal {
-	qty := s.orderQty()
-	if side != core.Sell || s.regimeState != RegimeTrendUp || !s.regimeCfg.Enabled {
-		return qty
-	}
-	minQty := s.rules.MinQty
-	if minQty.Cmp(decimal.Zero) > 0 && qty.Cmp(minQty) <= 0 {
-		return qty
-	}
-	factor := s.regimeCfg.TrendUpSellQtyFactor
-	if factor <= 0 || factor >= 1 {
-		return qty
-	}
-	scaled := qty.Mul(decimal.NewFromFloat(factor))
-	if minQty.Cmp(decimal.Zero) > 0 && scaled.Cmp(minQty) < 0 {
-		scaled = minQty
-	}
-	return scaled
-}
-
 func (s *SpotDual) effectiveRatios() (decimal.Decimal, decimal.Decimal) {
 	one := decimal.NewFromInt(1)
 	buy := s.Ratio
@@ -543,15 +460,6 @@ func (s *SpotDual) effectiveRatios() (decimal.Decimal, decimal.Decimal) {
 	if sell.Cmp(one) <= 0 {
 		sell = buy
 	}
-	if s.regimeCfg.Enabled {
-		switch s.regimeState {
-		case RegimeTrendUp:
-			buy = scaleSpacingRatio(buy, s.regimeCfg.TrendUpBuySpacingMult)
-		case RegimeTrendDown:
-			buy = scaleSpacingRatio(buy, s.regimeCfg.TrendDownBuySpacingMult)
-			sell = scaleSpacingRatio(sell, s.regimeCfg.TrendDownSellSpacingMult)
-		}
-	}
 	if buy.Cmp(one) <= 0 {
 		buy = s.Ratio
 	}
@@ -559,14 +467,6 @@ func (s *SpotDual) effectiveRatios() (decimal.Decimal, decimal.Decimal) {
 		sell = s.SellRatio
 	}
 	return buy, sell
-}
-
-func scaleSpacingRatio(base decimal.Decimal, mult float64) decimal.Decimal {
-	if base.Cmp(decimal.NewFromInt(1)) <= 0 || mult <= 0 {
-		return base
-	}
-	gap := base.Sub(decimal.NewFromInt(1))
-	return decimal.NewFromInt(1).Add(gap.Mul(decimal.NewFromFloat(mult)))
 }
 
 func (s *SpotDual) priceForLevel(idx int) decimal.Decimal {
@@ -623,7 +523,7 @@ func (s *SpotDual) placeLimit(ctx context.Context, side core.Side, idx int) erro
 	if price.Cmp(decimal.Zero) <= 0 {
 		return nil
 	}
-	qty := s.orderQtyForSide(side)
+	qty := s.orderQty()
 	if qty.Cmp(decimal.Zero) <= 0 {
 		return nil
 	}
@@ -735,75 +635,6 @@ func (s *SpotDual) shiftUp(ctx context.Context, filledLevel int) error {
 	s.maxLevel = newMax
 	for i := oldMax + 1; i <= newMax; i++ {
 		if err := s.placeLimit(ctx, core.Sell, i); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *SpotDual) updateRegime(price decimal.Decimal) bool {
-	return s.updateRegimeAt(price, time.Now().UTC())
-}
-
-func (s *SpotDual) updateRegimeAt(price decimal.Decimal, at time.Time) bool {
-	if s.regime == nil || !s.regimeCfg.Enabled {
-		return false
-	}
-	px := price.InexactFloat64()
-	if px <= 0 || math.IsNaN(px) || math.IsInf(px, 0) {
-		return false
-	}
-	now := at.UTC()
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
-	prev := s.regimeState
-	next, changed, score := s.regime.Update(px, now)
-	s.regimeState = next
-	if changed {
-		s.alertImportant("regime_changed", map[string]string{
-			"from":  string(prev),
-			"to":    string(next),
-			"score": strconv.FormatFloat(score, 'f', 4, 64),
-			"price": price.String(),
-		})
-	}
-	return changed
-}
-
-func (s *SpotDual) rebuildOrders(ctx context.Context, price decimal.Decimal) error {
-	if err := s.cancelAllOpenOrders(ctx); err != nil {
-		return err
-	}
-	s.openOrders = make(map[string]core.Order)
-	if price.Cmp(decimal.Zero) > 0 {
-		s.anchor = price
-	}
-	s.maxLevel = s.sellLevels()
-	s.minLevel = -s.Levels
-	for i := 1; i <= s.maxLevel; i++ {
-		if err := s.placeLimit(ctx, core.Sell, i); err != nil {
-			if isInsufficientBalanceError(err) {
-				s.alertImportant("rebuild_order_skipped_insufficient_balance", map[string]string{
-					"stage": "place_sell",
-					"level": strconv.Itoa(i),
-					"err":   err.Error(),
-				})
-				break
-			}
-			return err
-		}
-	}
-	for i := -1; i >= s.minLevel; i-- {
-		if err := s.placeLimit(ctx, core.Buy, i); err != nil {
-			if isInsufficientBalanceError(err) {
-				s.alertImportant("rebuild_order_skipped_insufficient_balance", map[string]string{
-					"stage": "place_buy",
-					"level": strconv.Itoa(i),
-					"err":   err.Error(),
-				})
-				break
-			}
 			return err
 		}
 	}
@@ -1025,7 +856,6 @@ func (s *SpotDual) snapshotState() store.GridState {
 		Rules:          s.rules,
 		Initialized:    s.initialized,
 		Stopped:        s.stopped,
-		Regime:         string(s.regimeState),
 	}
 	if s.minLevel != 0 {
 		state.Low = s.priceForLevel(s.minLevel)

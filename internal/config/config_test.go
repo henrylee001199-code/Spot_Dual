@@ -40,15 +40,6 @@ backtest:
 	if !cfg.Grid.SellRatio.Equal(cfg.Grid.Ratio.Decimal) {
 		t.Fatalf("grid.sell_ratio = %s, want %s", cfg.Grid.SellRatio.String(), cfg.Grid.Ratio.String())
 	}
-	if cfg.Grid.Regime.Window != 30 {
-		t.Fatalf("grid.regime.window = %d, want 30", cfg.Grid.Regime.Window)
-	}
-	if cfg.Grid.Regime.EnterConfirm != 3 {
-		t.Fatalf("grid.regime.enter_confirm = %d, want 3", cfg.Grid.Regime.EnterConfirm)
-	}
-	if cfg.Grid.Regime.ExitConfirm != 5 {
-		t.Fatalf("grid.regime.exit_confirm = %d, want 5", cfg.Grid.Regime.ExitConfirm)
-	}
 	if cfg.Exchange.UserStreamKeepaliveSec != 30 {
 		t.Fatalf("exchange.user_stream_keepalive_sec = %d, want 30", cfg.Exchange.UserStreamKeepaliveSec)
 	}
@@ -203,7 +194,7 @@ backtest:
 	}
 }
 
-func TestLoadRejectsInvalidRegimeMultiplier(t *testing.T) {
+func TestLoadRejectsRemovedRegimeField(t *testing.T) {
 	cfgPath := writeTempConfig(t, `
 mode: backtest
 symbol: BTCUSDT
@@ -213,7 +204,7 @@ grid:
   levels: 20
   qty: "0.001"
   regime:
-    trend_up_buy_spacing_mult: "1.1"
+    enabled: true
 
 backtest:
   data_path: data/binance/BTCUSDT/1m
@@ -233,8 +224,8 @@ backtest:
 	if err == nil {
 		t.Fatalf("Load() error = nil, want error")
 	}
-	if !strings.Contains(err.Error(), "grid regime.trend_up_buy_spacing_mult must be between 0 and 1") {
-		t.Fatalf("Load() error = %q, want regime multiplier validation", err.Error())
+	if !strings.Contains(err.Error(), "field regime not found") {
+		t.Fatalf("Load() error = %q, want unknown removed regime field message", err.Error())
 	}
 }
 

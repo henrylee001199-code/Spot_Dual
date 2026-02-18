@@ -11,18 +11,6 @@ grid:
   mode: geometric # only geometric is supported
   qty: "0.001" # order qty before rule rounding
   min_qty_multiple: 1 # final qty floor = min_qty * min_qty_multiple
-  regime:
-    enabled: false
-    window: 30
-    enter_score: "1.8"
-    exit_score: "1.2"
-    enter_confirm: 3
-    exit_confirm: 5
-    min_dwell_sec: 600
-    trend_up_buy_spacing_mult: "0.7" # trend_up: buy spacing becomes tighter
-    trend_down_buy_spacing_mult: "1.6" # trend_down: buy spacing becomes wider
-    trend_down_sell_spacing_mult: "0.7" # trend_down: sell spacing becomes tighter
-    trend_up_sell_qty_factor: "0.5" # trend_up: new sell qty scales down when qty > min_qty
 
 state:
   dir: "state" # state/{mode}/{symbol}/{instance_id}, includes state/open_orders/runtime_status
