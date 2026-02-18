@@ -101,14 +101,18 @@ func main() {
 			fatal(err.Error())
 		}
 		fmt.Printf(
-			"summary instance=%s trades=%d market_buy_count=%d market_buy_qty=%s total_return_pct=%s max_drawdown_pct=%s max_drawdown_quote=%s max_capital_usage_pct=%s start_equity_quote=%s end_equity_quote=%s fees_paid_quote=%s final_base=%s final_quote=%s\n",
+			"summary instance=%s trades=%d market_buy_count=%d market_buy_qty=%s total_return_pct=%s equity_return_pct=%s profit_quote=%s max_locked_capital_quote=%s max_drawdown_pct=%s max_drawdown_quote=%s capital_drawdown_pct=%s max_capital_usage_pct=%s start_equity_quote=%s end_equity_quote=%s fees_paid_quote=%s final_base=%s final_quote=%s\n",
 			cfg.InstanceID,
 			result.Trades,
 			result.MarketBuyCount,
 			result.MarketBuyQty.String(),
 			result.TotalReturnPct.StringFixed(4),
+			result.EquityReturnPct.StringFixed(4),
+			result.ProfitQuote.String(),
+			result.MaxLockedCapital.String(),
 			result.MaxDrawdownPct.StringFixed(4),
 			result.MaxDrawdownQuote.String(),
+			result.CapitalDrawdownPct.StringFixed(4),
 			result.MaxCapitalUsagePct.StringFixed(4),
 			result.StartEquityQuote.String(),
 			result.EndEquityQuote.String(),
@@ -200,7 +204,6 @@ func applySpotDualTuning(strat *strategy.SpotDual, cfg config.Config) {
 		return
 	}
 	strat.SetSellRatio(cfg.Grid.SellRatio.Decimal)
-	strat.SetQtyScale(cfg.Grid.QtyScale.Decimal)
 	strat.SetRegimeControl(strategy.RegimeControlConfig{
 		Enabled:                  cfg.Grid.Regime.Enabled,
 		Window:                   cfg.Grid.Regime.Window,

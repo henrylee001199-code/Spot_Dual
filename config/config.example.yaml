@@ -10,7 +10,6 @@ grid:
   shift_levels: 10 # active sell levels above anchor; also used as shift window size
   mode: geometric # only geometric is supported
   qty: "0.001" # order qty before rule rounding
-  qty_scale: "1" # global risk scaler (0,1], applied to qty before min_qty_multiple
   min_qty_multiple: 1 # final qty floor = min_qty * min_qty_multiple
   regime:
     enabled: false

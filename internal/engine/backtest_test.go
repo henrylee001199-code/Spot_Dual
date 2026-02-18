@@ -37,6 +37,24 @@ func (s *marketBuyInitStrategy) Init(ctx context.Context, price decimal.Decimal)
 
 func (s *marketBuyInitStrategy) OnFill(context.Context, core.Trade) error { return nil }
 
+type buyAndHoldLimitStrategy struct {
+	ex  *backtest.SimExchange
+	qty decimal.Decimal
+}
+
+func (s *buyAndHoldLimitStrategy) Init(ctx context.Context, price decimal.Decimal) error {
+	_, err := s.ex.PlaceOrder(ctx, core.Order{
+		Symbol: "BTCUSDT",
+		Side:   core.Buy,
+		Type:   core.Limit,
+		Price:  price,
+		Qty:    s.qty,
+	})
+	return err
+}
+
+func (s *buyAndHoldLimitStrategy) OnFill(context.Context, core.Trade) error { return nil }
+
 type tickAwareSpy struct {
 	prices []decimal.Decimal
 	times  []time.Time
@@ -261,6 +279,50 @@ func TestBacktestRunnerTracksMarketBuyStats(t *testing.T) {
 	}
 	if !res.MarketBuyQty.Equal(decimal.NewFromInt(1)) {
 		t.Fatalf("MarketBuyQty = %s, want 1", res.MarketBuyQty)
+	}
+}
+
+func TestBacktestRunnerUsesMaxLockedCapitalForTotalReturnPct(t *testing.T) {
+	t0 := time.Unix(50, 0).UTC()
+	feed := &multiTickFeed{
+		ticks: []backtest.Tick{
+			{Time: t0, Price: decimal.NewFromInt(100)},
+			{Time: t0.Add(time.Minute), Price: decimal.NewFromInt(80)},
+			{Time: t0.Add(2 * time.Minute), Price: decimal.NewFromInt(120)},
+		},
+	}
+	ex := backtest.NewSimExchange(
+		"BTCUSDT",
+		core.Balance{Base: decimal.Zero, Quote: decimal.NewFromInt(1000)},
+		core.Rules{},
+	)
+	strat := &buyAndHoldLimitStrategy{
+		ex:  ex,
+		qty: decimal.NewFromInt(1),
+	}
+	runner := BacktestRunner{
+		Exchange: ex,
+		Feed:     feed,
+		Strategy: strat,
+	}
+	res, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !res.ProfitQuote.Equal(decimal.NewFromInt(20)) {
+		t.Fatalf("ProfitQuote = %s, want 20", res.ProfitQuote)
+	}
+	if !res.MaxLockedCapital.Equal(decimal.NewFromInt(100)) {
+		t.Fatalf("MaxLockedCapital = %s, want 100", res.MaxLockedCapital)
+	}
+	if !res.EquityReturnPct.Equal(decimal.NewFromInt(2)) {
+		t.Fatalf("EquityReturnPct = %s, want 2", res.EquityReturnPct)
+	}
+	if !res.TotalReturnPct.Equal(decimal.NewFromInt(20)) {
+		t.Fatalf("TotalReturnPct = %s, want 20", res.TotalReturnPct)
+	}
+	if !res.CapitalDrawdownPct.Equal(decimal.NewFromInt(20)) {
+		t.Fatalf("CapitalDrawdownPct = %s, want 20", res.CapitalDrawdownPct)
 	}
 }
 

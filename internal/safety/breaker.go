@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"sync"
+	"time"
 
 	"grid-trading/internal/alert"
 	"grid-trading/internal/core"
@@ -14,53 +15,158 @@ import (
 
 var ErrCircuitOpen = errors.New("circuit breaker open")
 
+type circuitState string
+
+const (
+	circuitClosed   circuitState = "closed"
+	circuitOpen     circuitState = "open"
+	circuitHalfOpen circuitState = "half_open"
+)
+
+const (
+	defaultReconnectCooldown          = 30 * time.Second
+	defaultReconnectHalfOpenSuccesses = 1
+)
+
+type circuit struct {
+	maxFailures     int
+	failures        int
+	state           circuitState
+	openedAt        time.Time
+	openErr         error
+	halfOpenSuccess int
+}
+
 type Breaker struct {
 	enabled bool
 
-	maxPlaceFailures     int
-	maxCancelFailures    int
-	maxReconnectFailures int
+	mu        sync.Mutex
+	place     circuit
+	cancel    circuit
+	reconnect circuit
 
-	mu               sync.Mutex
-	placeFailures    int
-	cancelFailures   int
-	reconnectFailure int
-	open             bool
-	openErr          error
-	alerter          alert.Alerter
+	reconnectCooldown          time.Duration
+	reconnectHalfOpenSuccesses int
+
+	alerter alert.Alerter
 }
 
 func NewBreaker(enabled bool, maxPlaceFailures, maxCancelFailures, maxReconnectFailures int) *Breaker {
 	return &Breaker{
-		enabled:              enabled,
-		maxPlaceFailures:     maxPlaceFailures,
-		maxCancelFailures:    maxCancelFailures,
-		maxReconnectFailures: maxReconnectFailures,
+		enabled: enabled,
+		place: circuit{
+			maxFailures: maxPlaceFailures,
+			state:       circuitClosed,
+		},
+		cancel: circuit{
+			maxFailures: maxCancelFailures,
+			state:       circuitClosed,
+		},
+		reconnect: circuit{
+			maxFailures: maxReconnectFailures,
+			state:       circuitClosed,
+		},
+		reconnectCooldown:          defaultReconnectCooldown,
+		reconnectHalfOpenSuccesses: defaultReconnectHalfOpenSuccesses,
 	}
 }
 
+func (b *Breaker) SetReconnectRecovery(cooldown time.Duration, halfOpenSuccesses int) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if cooldown <= 0 {
+		cooldown = defaultReconnectCooldown
+	}
+	if halfOpenSuccesses < 1 {
+		halfOpenSuccesses = defaultReconnectHalfOpenSuccesses
+	}
+	b.reconnectCooldown = cooldown
+	b.reconnectHalfOpenSuccesses = halfOpenSuccesses
+}
+
 func (b *Breaker) RecordPlace(err error) error {
-	return b.record("place order", &b.placeFailures, b.maxPlaceFailures, err)
+	if b == nil {
+		return nil
+	}
+	return b.record("place order", &b.place, err)
 }
 
 func (b *Breaker) RecordCancel(err error) error {
-	return b.record("cancel order", &b.cancelFailures, b.maxCancelFailures, err)
+	if b == nil {
+		return nil
+	}
+	return b.record("cancel order", &b.cancel, err)
 }
 
 func (b *Breaker) RecordReconnect(err error) error {
-	return b.record("reconnect", &b.reconnectFailure, b.maxReconnectFailures, err)
+	if b == nil {
+		return nil
+	}
+	return b.record("reconnect", &b.reconnect, err)
+}
+
+func (b *Breaker) AllowReconnect() error {
+	if b == nil || !b.enabled {
+		return nil
+	}
+	b.mu.Lock()
+	state := b.reconnect.state
+	now := time.Now().UTC()
+	if state == circuitOpen {
+		if b.reconnectCooldown > 0 && now.Sub(b.reconnect.openedAt) < b.reconnectCooldown {
+			err := b.reconnect.openErr
+			if err == nil {
+				err = fmt.Errorf("%w: reconnect circuit is open", ErrCircuitOpen)
+			}
+			b.mu.Unlock()
+			return err
+		}
+		b.reconnect.state = circuitHalfOpen
+		b.reconnect.halfOpenSuccess = 0
+		b.reconnect.failures = 0
+		b.reconnect.openErr = nil
+		alerter := b.alerter
+		b.mu.Unlock()
+		log.Printf("level=INFO event=circuit_breaker_half_open action=%q cooldown_sec=%d", "reconnect", int64(b.reconnectCooldown/time.Second))
+		if alerter != nil {
+			alerter.Important("circuit_breaker_half_open", map[string]string{
+				"action":       "reconnect",
+				"cooldown_sec": strconv.FormatInt(int64(b.reconnectCooldown/time.Second), 10),
+			})
+		}
+		return nil
+	}
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *Breaker) ReconnectCooldownRemaining() time.Duration {
+	if b == nil || !b.enabled {
+		return 0
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.reconnect.state != circuitOpen {
+		return 0
+	}
+	if b.reconnectCooldown <= 0 {
+		return 0
+	}
+	elapsed := time.Since(b.reconnect.openedAt)
+	if elapsed >= b.reconnectCooldown {
+		return 0
+	}
+	return b.reconnectCooldown - elapsed
 }
 
 func (b *Breaker) ResetReconnect() {
 	if b == nil {
 		return
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.open || !b.enabled {
-		return
-	}
-	b.reconnectFailure = 0
+	_ = b.RecordReconnect(nil)
 }
 
 func (b *Breaker) SetAlerter(alerter alert.Alerter) {
@@ -72,44 +178,95 @@ func (b *Breaker) SetAlerter(alerter alert.Alerter) {
 	b.alerter = alerter
 }
 
-func (b *Breaker) record(name string, counter *int, limit int, err error) error {
-	if b == nil || !b.enabled {
+func (b *Breaker) record(name string, c *circuit, err error) error {
+	if b == nil || !b.enabled || c == nil {
 		return nil
 	}
+
 	b.mu.Lock()
-	if b.open {
-		openErr := b.openErr
-		b.mu.Unlock()
-		return openErr
-	}
-	if limit < 1 {
+	if c.maxFailures < 1 {
 		b.mu.Unlock()
 		return nil
 	}
+
 	if err == nil {
-		prevFailures := *counter
+		prevFailures := c.failures
+		prevState := c.state
+		recovered := false
+		switch c.state {
+		case circuitHalfOpen:
+			c.halfOpenSuccess++
+			if c.halfOpenSuccess >= b.reconnectHalfOpenSuccesses || name != "reconnect" {
+				recovered = true
+				c.state = circuitClosed
+				c.failures = 0
+				c.openErr = nil
+				c.openedAt = time.Time{}
+				c.halfOpenSuccess = 0
+			}
+		case circuitOpen:
+			// non-reconnect paths cannot probe while open; keep state untouched.
+		case circuitClosed:
+			if c.failures > 0 {
+				recovered = true
+				c.failures = 0
+			}
+		}
 		alerter := b.alerter
-		*counter = 0
 		b.mu.Unlock()
-		if prevFailures > 0 {
+		if recovered {
 			log.Printf(
-				"level=INFO event=circuit_breaker_recovered action=%q previous_consecutive_failures=%d threshold=%d",
+				"level=INFO event=circuit_breaker_recovered action=%q previous_consecutive_failures=%d from_state=%q",
 				name,
 				prevFailures,
-				limit,
+				string(prevState),
 			)
 			if alerter != nil {
 				alerter.Important("circuit_breaker_recovered", map[string]string{
 					"action":                        name,
 					"previous_consecutive_failures": strconv.Itoa(prevFailures),
-					"threshold":                     strconv.Itoa(limit),
+					"from_state":                    string(prevState),
 				})
 			}
 		}
 		return nil
 	}
-	*counter++
-	failures := *counter
+
+	if c.state == circuitOpen {
+		openErr := c.openErr
+		if openErr == nil {
+			openErr = fmt.Errorf("%w: %s circuit is open", ErrCircuitOpen, name)
+			c.openErr = openErr
+		}
+		b.mu.Unlock()
+		return openErr
+	}
+
+	if c.state == circuitHalfOpen {
+		openErr := b.tripLocked(name, c, err, 1, "half_open_probe_failed")
+		alerter := b.alerter
+		b.mu.Unlock()
+		log.Printf(
+			"level=ERROR event=circuit_breaker_trip action=%q phase=%q threshold=%d last_error=%q",
+			name,
+			"half_open",
+			c.maxFailures,
+			err.Error(),
+		)
+		if alerter != nil {
+			alerter.Important("circuit_breaker_trip", map[string]string{
+				"action":     name,
+				"phase":      "half_open",
+				"threshold":  strconv.Itoa(c.maxFailures),
+				"last_error": err.Error(),
+			})
+		}
+		return openErr
+	}
+
+	c.failures++
+	failures := c.failures
+	limit := c.maxFailures
 	alerter := b.alerter
 	if failures < limit {
 		nearTrip := shouldWarnNearTrip(name, failures, limit)
@@ -134,11 +291,8 @@ func (b *Breaker) record(name string, counter *int, limit int, err error) error 
 		return nil
 	}
 
-	b.open = true
-	b.openErr = fmt.Errorf("%w: %s failed %d consecutive times, last error: %v", ErrCircuitOpen, name, failures, err)
-	openErr := b.openErr
+	openErr := b.tripLocked(name, c, err, failures, "consecutive_failures")
 	b.mu.Unlock()
-
 	log.Printf(
 		"level=ERROR event=circuit_breaker_trip action=%q consecutive_failures=%d threshold=%d last_error=%q",
 		name,
@@ -155,6 +309,22 @@ func (b *Breaker) record(name string, counter *int, limit int, err error) error 
 		})
 	}
 	return openErr
+}
+
+func (b *Breaker) tripLocked(name string, c *circuit, err error, failures int, reason string) error {
+	if failures < 1 {
+		failures = c.maxFailures
+	}
+	c.state = circuitOpen
+	c.openedAt = time.Now().UTC()
+	c.halfOpenSuccess = 0
+	c.failures = failures
+	if name == "reconnect" && b.reconnectCooldown > 0 {
+		c.openErr = fmt.Errorf("%w: %s failed %d consecutive times, cooldown=%s, reason=%s, last error: %v", ErrCircuitOpen, name, failures, b.reconnectCooldown.String(), reason, err)
+	} else {
+		c.openErr = fmt.Errorf("%w: %s failed %d consecutive times, reason=%s, last error: %v", ErrCircuitOpen, name, failures, reason, err)
+	}
+	return c.openErr
 }
 
 func shouldWarnNearTrip(action string, failures, limit int) bool {

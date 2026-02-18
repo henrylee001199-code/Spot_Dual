@@ -8,7 +8,6 @@ grid:
   shift_levels: 12
   mode: geometric
   qty: "0.001"
-  qty_scale: "0.46"
   min_qty_multiple: 1
 
 state:

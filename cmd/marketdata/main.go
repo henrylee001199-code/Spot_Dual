@@ -46,16 +46,15 @@ type tickLine struct {
 
 type dateWriter struct {
 	root        string
-	overwrite   bool
 	currentDate string
 	currentFile *os.File
 }
 
-func newDateWriter(root string, overwrite bool) (*dateWriter, error) {
+func newDateWriter(root string) (*dateWriter, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
 	}
-	return &dateWriter{root: root, overwrite: overwrite}, nil
+	return &dateWriter{root: root}, nil
 }
 
 func (w *dateWriter) write(date string, line []byte) error {
@@ -85,13 +84,7 @@ func (w *dateWriter) rotate(date string) error {
 		w.currentFile = nil
 	}
 	path := filepath.Join(w.root, date+".jsonl")
-	flags := os.O_CREATE | os.O_WRONLY
-	if w.overwrite {
-		flags |= os.O_TRUNC
-	} else {
-		flags |= os.O_APPEND
-	}
-	f, err := os.OpenFile(path, flags, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
@@ -123,8 +116,7 @@ func main() {
 		startRaw string
 		endRaw   string
 		outDir   string
-		timeout   int
-		overwrite bool
+		timeout  int
 	)
 
 	flag.StringVar(&baseURL, "base-url", defaultBaseURL, "exchange REST base url")
@@ -135,7 +127,6 @@ func main() {
 	flag.StringVar(&endRaw, "end", "", "end time (YYYY-MM-DD or RFC3339, UTC), inclusive for date")
 	flag.StringVar(&outDir, "out-dir", defaultOutDir, "output root dir")
 	flag.IntVar(&timeout, "timeout-sec", 20, "http timeout seconds")
-	flag.BoolVar(&overwrite, "overwrite", false, "overwrite existing day files instead of append")
 	flag.Parse()
 
 	symbol = strings.ToUpper(strings.TrimSpace(symbol))
@@ -150,7 +141,7 @@ func main() {
 	}
 
 	targetDir := filepath.Join(outDir, symbol, interval)
-	writer, err := newDateWriter(targetDir, overwrite)
+	writer, err := newDateWriter(targetDir)
 	if err != nil {
 		fatal(err.Error())
 	}

@@ -481,7 +481,7 @@ func TestLiveReconcileMissingAutoHandlesClosedPartialFill(t *testing.T) {
 	assertNoAsyncErr(t, asyncErrs)
 }
 
-func TestLiveRunnerTripsReconnectCircuitBreaker(t *testing.T) {
+func TestLiveRunnerReconnectCircuitBreakerDoesNotStopRunner(t *testing.T) {
 	asyncErrs := make(chan error, 16)
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -511,6 +511,7 @@ func TestLiveRunnerTripsReconnectCircuitBreaker(t *testing.T) {
 
 	strat := &liveStrategySpy{}
 	breaker := safety.NewBreaker(true, 5, 5, 1)
+	breaker.SetReconnectRecovery(30*time.Second, 1)
 	runner := LiveRunner{
 		Exchange: client,
 		Strategy: strat,
@@ -523,10 +524,10 @@ func TestLiveRunnerTripsReconnectCircuitBreaker(t *testing.T) {
 
 	err := runner.Run(ctx)
 	if err == nil {
-		t.Fatalf("Run() error = nil, want circuit breaker error")
+		t.Fatalf("Run() error = nil, want context deadline")
 	}
-	if !errors.Is(err, safety.ErrCircuitOpen) {
-		t.Fatalf("Run() error = %v, want errors.Is(_, ErrCircuitOpen)", err)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run() error = %v, want errors.Is(_, context.DeadlineExceeded)", err)
 	}
 
 	assertNoAsyncErr(t, asyncErrs)
@@ -679,6 +680,7 @@ func TestLiveRunnerPersistsReconnectAttemptsOnCircuitTrip(t *testing.T) {
 	}
 	strat := &liveStrategySpy{}
 	breaker := safety.NewBreaker(true, 5, 5, 1)
+	breaker.SetReconnectRecovery(30*time.Second, 1)
 	runner := LiveRunner{
 		Exchange:   client,
 		Strategy:   strat,
@@ -694,10 +696,10 @@ func TestLiveRunnerPersistsReconnectAttemptsOnCircuitTrip(t *testing.T) {
 
 	err = runner.Run(ctx)
 	if err == nil {
-		t.Fatalf("Run() error = nil, want circuit breaker error")
+		t.Fatalf("Run() error = nil, want deadline exceeded")
 	}
-	if !errors.Is(err, safety.ErrCircuitOpen) {
-		t.Fatalf("Run() error = %v, want errors.Is(_, ErrCircuitOpen)", err)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run() error = %v, want errors.Is(_, context.DeadlineExceeded)", err)
 	}
 
 	status, ok, loadErr := st.LoadRuntimeStatus()

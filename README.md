@@ -84,8 +84,6 @@ cp config/config.example.yaml config/config.yaml
   -out-dir data/binance
 ```
 
-默认按天文件追加写入；如需覆盖已有当日文件，可增加：`-overwrite`。
-
 2) 配置 `mode: backtest`，并设置：
 
 - `backtest.data_path`

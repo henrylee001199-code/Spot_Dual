@@ -27,9 +27,13 @@ type BacktestResult struct {
 	FinalBalance        core.Balance
 	StartEquityQuote    decimal.Decimal
 	EndEquityQuote      decimal.Decimal
+	ProfitQuote         decimal.Decimal
+	MaxLockedCapital    decimal.Decimal
 	TotalReturnPct      decimal.Decimal
+	EquityReturnPct     decimal.Decimal
 	MaxDrawdownPct      decimal.Decimal
 	MaxDrawdownQuote    decimal.Decimal
+	CapitalDrawdownPct  decimal.Decimal
 	MaxCapitalUsagePct  decimal.Decimal
 	FeesPaidQuote       decimal.Decimal
 	DailyPnLQuoteSeries []DailyPnL
@@ -51,6 +55,7 @@ func (r *BacktestRunner) Run(ctx context.Context) (BacktestResult, error) {
 	maxDrawdown := decimal.Zero
 	maxDrawdownQuote := decimal.Zero
 	maxUsage := decimal.Zero
+	maxLockedCapital := decimal.Zero
 	dailyClose := make(map[string]decimal.Decimal)
 	dayOrder := make([]string, 0)
 	tickAware, hasTickAware := r.Strategy.(strategy.TickAware)
@@ -79,6 +84,9 @@ func (r *BacktestRunner) Run(ctx context.Context) (BacktestResult, error) {
 			if usage.Cmp(maxUsage) > 0 {
 				maxUsage = usage
 			}
+		}
+		if snap.LockedCapital.Cmp(maxLockedCapital) > 0 {
+			maxLockedCapital = snap.LockedCapital
 		}
 		day := tick.Time.UTC().Format("2006-01-02")
 		if _, ok := dailyClose[day]; !ok {
@@ -145,8 +153,16 @@ func (r *BacktestRunner) Run(ctx context.Context) (BacktestResult, error) {
 	result.MaxDrawdownPct = maxDrawdown.Mul(decimal.NewFromInt(100))
 	result.MaxDrawdownQuote = maxDrawdownQuote
 	result.MaxCapitalUsagePct = maxUsage.Mul(decimal.NewFromInt(100))
+	result.MaxLockedCapital = maxLockedCapital
+	result.ProfitQuote = result.EndEquityQuote.Sub(result.StartEquityQuote)
 	if result.StartEquityQuote.Cmp(decimal.Zero) > 0 {
-		result.TotalReturnPct = result.EndEquityQuote.Sub(result.StartEquityQuote).Div(result.StartEquityQuote).Mul(decimal.NewFromInt(100))
+		result.EquityReturnPct = result.ProfitQuote.Div(result.StartEquityQuote).Mul(decimal.NewFromInt(100))
+	}
+	if maxLockedCapital.Cmp(decimal.Zero) > 0 {
+		// Capital-efficiency return: profit over peak locked capital.
+		result.TotalReturnPct = result.ProfitQuote.Div(maxLockedCapital).Mul(decimal.NewFromInt(100))
+		// Capital-denominated drawdown: max equity drop over peak locked capital.
+		result.CapitalDrawdownPct = result.MaxDrawdownQuote.Div(maxLockedCapital).Mul(decimal.NewFromInt(100))
 	}
 	prevClose := result.StartEquityQuote
 	for _, day := range dayOrder {

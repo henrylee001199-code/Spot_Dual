@@ -54,6 +54,22 @@ func (r *LiveRunner) Run(ctx context.Context) (runErr error) {
 
 	for {
 		reconnect := reconnectAttempts > 0
+		if reconnect && r.Breaker != nil {
+			if allowErr := r.Breaker.AllowReconnect(); allowErr != nil {
+				r.persistRuntimeStatus("degraded", startedAt, reconnectAttempts, disconnectStartedAt, allowErr)
+				wait := time.Second
+				if rem := r.Breaker.ReconnectCooldownRemaining(); rem > wait {
+					wait = rem
+				}
+				select {
+				case <-time.After(wait):
+				case <-ctx.Done():
+					runErr = ctx.Err()
+					return runErr
+				}
+				continue
+			}
+		}
 		r.persistRuntimeStatus("running", startedAt, reconnectAttempts, disconnectStartedAt, nil)
 		if err := r.runOnce(ctx, reconnect, seen, &reconnectAttempts, &disconnectStartedAt, &backoff, startedAt); err != nil {
 			if ctx.Err() != nil {
@@ -78,19 +94,6 @@ func (r *LiveRunner) Run(ctx context.Context) (runErr error) {
 					"reason": err.Error(),
 				})
 			}
-			if errors.Is(err, safety.ErrCircuitOpen) {
-				r.persistRuntimeStatus("degraded", startedAt, reconnectAttempts, disconnectStartedAt, err)
-				log.Printf("level=ERROR event=runner_stopped reason=%q", err.Error())
-				r.alertImportant("runner_stopped", map[string]string{
-					"reason": err.Error(),
-				})
-				r.alertImportant("manual_intervention_required", map[string]string{
-					"reason": "circuit_breaker_open",
-					"detail": err.Error(),
-				})
-				runErr = err
-				return runErr
-			}
 			if errors.Is(err, ErrManualIntervention) {
 				r.persistRuntimeStatus("degraded", startedAt, reconnectAttempts, disconnectStartedAt, err)
 				log.Printf("level=ERROR event=runner_stopped reason=%q", err.Error())
@@ -106,22 +109,24 @@ func (r *LiveRunner) Run(ctx context.Context) (runErr error) {
 			}
 			nextAttempts := reconnectAttempts + 1
 			r.persistRuntimeStatus("degraded", startedAt, nextAttempts, disconnectStartedAt, err)
-			if trip := r.Breaker.RecordReconnect(err); trip != nil {
+			var trip error
+			if r.Breaker != nil {
+				trip = r.Breaker.RecordReconnect(err)
+			}
+			if trip != nil && !errors.Is(trip, safety.ErrCircuitOpen) {
 				reconnectAttempts = nextAttempts
-				log.Printf("level=ERROR event=runner_stopped reason=%q", trip.Error())
-				r.alertImportant("runner_stopped", map[string]string{
-					"reason": trip.Error(),
-				})
-				r.alertImportant("manual_intervention_required", map[string]string{
-					"reason": "reconnect_circuit_breaker_open",
-					"detail": trip.Error(),
-				})
 				runErr = trip
 				return runErr
 			}
 			reconnectAttempts = nextAttempts
+			wait := backoff
+			if trip != nil && errors.Is(trip, safety.ErrCircuitOpen) && r.Breaker != nil {
+				if rem := r.Breaker.ReconnectCooldownRemaining(); rem > wait {
+					wait = rem
+				}
+			}
 			select {
-			case <-time.After(backoff):
+			case <-time.After(wait):
 			case <-ctx.Done():
 				runErr = ctx.Err()
 				return runErr

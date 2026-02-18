@@ -52,7 +52,6 @@ type GridConfig struct {
 	ShiftLevels    int              `yaml:"shift_levels"`
 	Mode           GridMode         `yaml:"mode"`
 	Qty            Decimal          `yaml:"qty"`
-	QtyScale       Decimal          `yaml:"qty_scale"`
 	MinQtyMultiple int64            `yaml:"min_qty_multiple"`
 	Regime         GridRegimeConfig `yaml:"regime"`
 }
@@ -197,9 +196,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Grid.MinQtyMultiple == 0 {
 		c.Grid.MinQtyMultiple = 1
-	}
-	if c.Grid.QtyScale.Cmp(decimal.Zero) == 0 {
-		c.Grid.QtyScale = Decimal{Decimal: decimal.NewFromInt(1)}
 	}
 	if c.Grid.SellRatio.Cmp(decimal.Zero) == 0 {
 		c.Grid.SellRatio = c.Grid.Ratio
@@ -384,9 +380,6 @@ func (c Config) Validate() error {
 	}
 	if c.Grid.Qty.Cmp(decimal.Zero) <= 0 {
 		return fmt.Errorf("qty must be > 0")
-	}
-	if c.Grid.QtyScale.Cmp(decimal.Zero) <= 0 || c.Grid.QtyScale.Cmp(decimal.NewFromInt(1)) > 0 {
-		return fmt.Errorf("qty_scale must be > 0 and <= 1")
 	}
 	if c.Grid.MinQtyMultiple < 1 {
 		return fmt.Errorf("min_qty_multiple must be >= 1")

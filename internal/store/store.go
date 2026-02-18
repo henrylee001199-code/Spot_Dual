@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -204,10 +205,22 @@ func writeJSONAtomic(path string, v any) error {
 	// Best-effort directory fsync to improve rename durability across crashes.
 	d, err := os.Open(dir)
 	if err != nil {
+		log.Printf(
+			"level=WARN event=store_dir_fsync_skipped reason=%q dir=%q target=%q",
+			err.Error(),
+			dir,
+			path,
+		)
 		return nil
 	}
 	defer d.Close()
 	if err := d.Sync(); err != nil {
+		log.Printf(
+			"level=WARN event=store_dir_fsync_failed reason=%q dir=%q target=%q",
+			err.Error(),
+			dir,
+			path,
+		)
 		return nil
 	}
 	return nil

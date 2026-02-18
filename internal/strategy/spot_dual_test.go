@@ -18,6 +18,9 @@ type fakeExecutor struct {
 	placed   []core.Order
 	canceled []string
 	balance  core.Balance
+
+	cancelErrByID map[string]error
+	cancelErr     error
 }
 
 func (f *fakeExecutor) PlaceOrder(_ context.Context, order core.Order) (core.Order, error) {
@@ -37,6 +40,14 @@ func (f *fakeExecutor) PlaceOrder(_ context.Context, order core.Order) (core.Ord
 
 func (f *fakeExecutor) CancelOrder(_ context.Context, _ string, orderID string) error {
 	f.canceled = append(f.canceled, orderID)
+	if f.cancelErrByID != nil {
+		if err, ok := f.cancelErrByID[orderID]; ok {
+			return err
+		}
+	}
+	if f.cancelErr != nil {
+		return f.cancelErr
+	}
 	return nil
 }
 
@@ -298,6 +309,46 @@ func TestSpotDualOnFillBuyAtBottomExtendsDown(t *testing.T) {
 		if _, ok := findOpenOrder(s, core.Buy, level); !ok {
 			t.Fatalf("missing extended buy at level %d", level)
 		}
+	}
+}
+
+func TestSpotDualShiftUpCancelFailureKeepsFailedOrderTracked(t *testing.T) {
+	s, exec := newSpotDualForTest(3, 1, "10")
+	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	topSell, ok := findOpenOrder(s, core.Sell, s.maxLevel)
+	if !ok {
+		t.Fatalf("missing top sell order")
+	}
+	lowestBuy, ok := findOpenOrder(s, core.Buy, s.minLevel)
+	if !ok {
+		t.Fatalf("missing lowest buy order")
+	}
+	oldMin := s.minLevel
+	oldMax := s.maxLevel
+	exec.cancelErrByID = map[string]error{
+		lowestBuy.ID: errors.New("cancel failed"),
+	}
+
+	err := s.OnFill(context.Background(), core.Trade{
+		OrderID: topSell.ID,
+		Symbol:  s.Symbol,
+		Side:    core.Sell,
+		Price:   topSell.Price,
+		Qty:     topSell.Qty,
+		Time:    time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatalf("OnFill() error = nil, want cancel failure")
+	}
+
+	if _, ok := s.openOrders[lowestBuy.ID]; !ok {
+		t.Fatalf("failed-cancel order %s should remain tracked", lowestBuy.ID)
+	}
+	if s.minLevel != oldMin || s.maxLevel != oldMax {
+		t.Fatalf("window changed on failed shift: got [%d,%d], want [%d,%d]", s.minLevel, s.maxLevel, oldMin, oldMax)
 	}
 }
 
