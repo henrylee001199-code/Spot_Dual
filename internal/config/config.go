@@ -45,29 +45,14 @@ type Config struct {
 }
 
 type GridConfig struct {
-	StopPrice      Decimal          `yaml:"stop_price"`
-	Ratio          Decimal          `yaml:"ratio"`
-	SellRatio      Decimal          `yaml:"sell_ratio"`
-	Levels         int              `yaml:"levels"`
-	ShiftLevels    int              `yaml:"shift_levels"`
-	Mode           GridMode         `yaml:"mode"`
-	Qty            Decimal          `yaml:"qty"`
-	MinQtyMultiple int64            `yaml:"min_qty_multiple"`
-	Regime         GridRegimeConfig `yaml:"regime"`
-}
-
-type GridRegimeConfig struct {
-	Enabled                  bool    `yaml:"enabled"`
-	Window                   int     `yaml:"window"`
-	EnterScore               Decimal `yaml:"enter_score"`
-	ExitScore                Decimal `yaml:"exit_score"`
-	EnterConfirm             int     `yaml:"enter_confirm"`
-	ExitConfirm              int     `yaml:"exit_confirm"`
-	MinDwellSec              int64   `yaml:"min_dwell_sec"`
-	TrendUpBuySpacingMult    Decimal `yaml:"trend_up_buy_spacing_mult"`
-	TrendDownBuySpacingMult  Decimal `yaml:"trend_down_buy_spacing_mult"`
-	TrendDownSellSpacingMult Decimal `yaml:"trend_down_sell_spacing_mult"`
-	TrendUpSellQtyFactor     Decimal `yaml:"trend_up_sell_qty_factor"`
+	StopPrice      Decimal  `yaml:"stop_price"`
+	Ratio          Decimal  `yaml:"ratio"`
+	SellRatio      Decimal  `yaml:"sell_ratio"`
+	Levels         int      `yaml:"levels"`
+	ShiftLevels    int      `yaml:"shift_levels"`
+	Mode           GridMode `yaml:"mode"`
+	Qty            Decimal  `yaml:"qty"`
+	MinQtyMultiple int64    `yaml:"min_qty_multiple"`
 }
 
 type BacktestConfig struct {
@@ -200,36 +185,6 @@ func (c *Config) applyDefaults() {
 	if c.Grid.SellRatio.Cmp(decimal.Zero) == 0 {
 		c.Grid.SellRatio = c.Grid.Ratio
 	}
-	if c.Grid.Regime.Window == 0 {
-		c.Grid.Regime.Window = 30
-	}
-	if c.Grid.Regime.EnterScore.Cmp(decimal.Zero) == 0 {
-		c.Grid.Regime.EnterScore = Decimal{Decimal: decimal.RequireFromString("1.8")}
-	}
-	if c.Grid.Regime.ExitScore.Cmp(decimal.Zero) == 0 {
-		c.Grid.Regime.ExitScore = Decimal{Decimal: decimal.RequireFromString("1.2")}
-	}
-	if c.Grid.Regime.EnterConfirm == 0 {
-		c.Grid.Regime.EnterConfirm = 3
-	}
-	if c.Grid.Regime.ExitConfirm == 0 {
-		c.Grid.Regime.ExitConfirm = 5
-	}
-	if c.Grid.Regime.MinDwellSec == 0 {
-		c.Grid.Regime.MinDwellSec = 600
-	}
-	if c.Grid.Regime.TrendUpBuySpacingMult.Cmp(decimal.Zero) == 0 {
-		c.Grid.Regime.TrendUpBuySpacingMult = Decimal{Decimal: decimal.RequireFromString("0.7")}
-	}
-	if c.Grid.Regime.TrendDownBuySpacingMult.Cmp(decimal.Zero) == 0 {
-		c.Grid.Regime.TrendDownBuySpacingMult = Decimal{Decimal: decimal.RequireFromString("1.6")}
-	}
-	if c.Grid.Regime.TrendDownSellSpacingMult.Cmp(decimal.Zero) == 0 {
-		c.Grid.Regime.TrendDownSellSpacingMult = Decimal{Decimal: decimal.RequireFromString("0.7")}
-	}
-	if c.Grid.Regime.TrendUpSellQtyFactor.Cmp(decimal.Zero) == 0 {
-		c.Grid.Regime.TrendUpSellQtyFactor = Decimal{Decimal: decimal.RequireFromString("0.5")}
-	}
 	if c.Grid.ShiftLevels == 0 && c.Grid.Levels > 0 {
 		c.Grid.ShiftLevels = c.Grid.Levels / 2
 		if c.Grid.ShiftLevels < 1 {
@@ -344,39 +299,6 @@ func (c Config) Validate() error {
 	}
 	if c.Grid.SellRatio.Cmp(decimal.NewFromInt(1)) <= 0 {
 		return fmt.Errorf("grid sell_ratio must be > 1")
-	}
-	if c.Grid.Regime.Window < 5 || c.Grid.Regime.Window > 600 {
-		return fmt.Errorf("grid regime.window must be between 5 and 600")
-	}
-	if c.Grid.Regime.EnterScore.Cmp(decimal.Zero) <= 0 {
-		return fmt.Errorf("grid regime.enter_score must be > 0")
-	}
-	if c.Grid.Regime.ExitScore.Cmp(decimal.Zero) <= 0 {
-		return fmt.Errorf("grid regime.exit_score must be > 0")
-	}
-	if c.Grid.Regime.EnterScore.Cmp(c.Grid.Regime.ExitScore.Decimal) <= 0 {
-		return fmt.Errorf("grid regime.enter_score must be > exit_score")
-	}
-	if c.Grid.Regime.EnterConfirm < 1 || c.Grid.Regime.EnterConfirm > 20 {
-		return fmt.Errorf("grid regime.enter_confirm must be between 1 and 20")
-	}
-	if c.Grid.Regime.ExitConfirm < 1 || c.Grid.Regime.ExitConfirm > 20 {
-		return fmt.Errorf("grid regime.exit_confirm must be between 1 and 20")
-	}
-	if c.Grid.Regime.MinDwellSec < 0 || c.Grid.Regime.MinDwellSec > 86400 {
-		return fmt.Errorf("grid regime.min_dwell_sec must be between 0 and 86400")
-	}
-	if c.Grid.Regime.TrendUpBuySpacingMult.Cmp(decimal.Zero) <= 0 || c.Grid.Regime.TrendUpBuySpacingMult.Cmp(decimal.NewFromInt(1)) >= 0 {
-		return fmt.Errorf("grid regime.trend_up_buy_spacing_mult must be between 0 and 1")
-	}
-	if c.Grid.Regime.TrendDownBuySpacingMult.Cmp(decimal.NewFromInt(1)) <= 0 {
-		return fmt.Errorf("grid regime.trend_down_buy_spacing_mult must be > 1")
-	}
-	if c.Grid.Regime.TrendDownSellSpacingMult.Cmp(decimal.Zero) <= 0 || c.Grid.Regime.TrendDownSellSpacingMult.Cmp(decimal.NewFromInt(1)) >= 0 {
-		return fmt.Errorf("grid regime.trend_down_sell_spacing_mult must be between 0 and 1")
-	}
-	if c.Grid.Regime.TrendUpSellQtyFactor.Cmp(decimal.Zero) <= 0 || c.Grid.Regime.TrendUpSellQtyFactor.Cmp(decimal.NewFromInt(1)) > 0 {
-		return fmt.Errorf("grid regime.trend_up_sell_qty_factor must be between 0 and 1")
 	}
 	if c.Grid.Qty.Cmp(decimal.Zero) <= 0 {
 		return fmt.Errorf("qty must be > 0")

@@ -415,19 +415,6 @@ func runBootstrapDistributionCheck(ctx context.Context, cfg config.Config, clien
 		client,
 	)
 	strat.SetSellRatio(cfg.Grid.SellRatio.Decimal)
-	strat.SetRegimeControl(strategy.RegimeControlConfig{
-		Enabled:                  cfg.Grid.Regime.Enabled,
-		Window:                   cfg.Grid.Regime.Window,
-		EnterScore:               cfg.Grid.Regime.EnterScore.InexactFloat64(),
-		ExitScore:                cfg.Grid.Regime.ExitScore.InexactFloat64(),
-		EnterConfirm:             cfg.Grid.Regime.EnterConfirm,
-		ExitConfirm:              cfg.Grid.Regime.ExitConfirm,
-		MinDwell:                 time.Duration(cfg.Grid.Regime.MinDwellSec) * time.Second,
-		TrendUpBuySpacingMult:    cfg.Grid.Regime.TrendUpBuySpacingMult.InexactFloat64(),
-		TrendDownBuySpacingMult:  cfg.Grid.Regime.TrendDownBuySpacingMult.InexactFloat64(),
-		TrendDownSellSpacingMult: cfg.Grid.Regime.TrendDownSellSpacingMult.InexactFloat64(),
-		TrendUpSellQtyFactor:     cfg.Grid.Regime.TrendUpSellQtyFactor.InexactFloat64(),
-	})
 	initErr := strat.Init(ctx, anchor)
 
 	after, err := client.OpenOrders(ctx, cfg.Symbol)

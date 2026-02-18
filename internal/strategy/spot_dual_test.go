@@ -159,7 +159,7 @@ func TestSpotDualPriceForLevelUsesBuyAndSellRatios(t *testing.T) {
 	}
 }
 
-func TestSpotDualTrendUpReducesNewSellQty(t *testing.T) {
+func TestSpotDualPlaceLimitKeepsBuyAndSellQtyEqual(t *testing.T) {
 	exec := &fakeExecutor{
 		balance: core.Balance{
 			Base:  decimal.RequireFromString("100"),
@@ -181,8 +181,6 @@ func TestSpotDualTrendUpReducesNewSellQty(t *testing.T) {
 		nil,
 		exec,
 	)
-	s.SetRegimeControl(RegimeControlConfig{Enabled: true})
-	s.regimeState = RegimeTrendUp
 	s.anchor = decimal.NewFromInt(100)
 	s.minLevel = -3
 	s.maxLevel = 2
@@ -202,8 +200,8 @@ func TestSpotDualTrendUpReducesNewSellQty(t *testing.T) {
 		t.Fatalf("missing buy order")
 	}
 
-	if !sell.Qty.Equal(decimal.RequireFromString("1")) {
-		t.Fatalf("trend_up sell qty = %s, want 1", sell.Qty)
+	if !sell.Qty.Equal(decimal.RequireFromString("2")) {
+		t.Fatalf("sell qty = %s, want 2", sell.Qty)
 	}
 	if !buy.Qty.Equal(decimal.RequireFromString("2")) {
 		t.Fatalf("buy qty = %s, want 2", buy.Qty)
@@ -554,208 +552,6 @@ func TestSpotDualReconcileKeepsZeroMinLevelAfterShiftedState(t *testing.T) {
 		if ord.Side == core.Buy && ord.GridIndex < 0 {
 			t.Fatalf("unexpected negative buy level after reconcile: %d", ord.GridIndex)
 		}
-	}
-}
-
-func TestSpotDualOnTickRegimeChangeRebuildsOrders(t *testing.T) {
-	s, exec := newSpotDualForTest(3, 1, "10")
-	s.SetRegimeControl(RegimeControlConfig{
-		Enabled:               true,
-		Window:                5,
-		EnterScore:            0.1,
-		ExitScore:             0.05,
-		EnterConfirm:          1,
-		ExitConfirm:           1,
-		TrendUpBuySpacingMult: 0.5,
-	})
-	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
-	initialBuy, ok := findOpenOrder(s, core.Buy, -1)
-	if !ok {
-		t.Fatalf("missing initial buy order at level -1")
-	}
-	initialPlaced := len(exec.placed)
-
-	t0 := time.Unix(0, 0).UTC()
-	changed := false
-	for i, px := range []int64{101, 102, 103, 104, 105, 106} {
-		err := s.OnTick(context.Background(), decimal.NewFromInt(px), t0.Add(time.Duration(i+1)*time.Minute))
-		if err != nil {
-			t.Fatalf("OnTick() error = %v", err)
-		}
-		if s.regimeState == RegimeTrendUp {
-			changed = true
-			break
-		}
-	}
-	if !changed {
-		t.Fatalf("regime did not switch to trend_up")
-	}
-	if len(exec.canceled) == 0 {
-		t.Fatalf("expected orders to be canceled during regime rebuild")
-	}
-	rebuiltBuy, ok := findOpenOrder(s, core.Buy, -1)
-	if !ok {
-		t.Fatalf("missing rebuilt buy order at level -1")
-	}
-	if rebuiltBuy.ID == initialBuy.ID {
-		t.Fatalf("buy order at level -1 was not rebuilt")
-	}
-	if rebuiltBuy.Price.Cmp(initialBuy.Price) <= 0 {
-		t.Fatalf("rebuilt buy price = %s, want > %s after trend_up spacing shrink", rebuiltBuy.Price, initialBuy.Price)
-	}
-	if len(exec.placed) <= initialPlaced {
-		t.Fatalf("placed order count = %d, want > %d after rebuild", len(exec.placed), initialPlaced)
-	}
-}
-
-func TestSpotDualOnTickRegimeRebuildResetsAnchorAndWindow(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 1, "10")
-	s.SetRegimeControl(RegimeControlConfig{
-		Enabled:               true,
-		Window:                5,
-		EnterScore:            0.1,
-		ExitScore:             0.05,
-		EnterConfirm:          1,
-		ExitConfirm:           1,
-		TrendUpBuySpacingMult: 0.5,
-	})
-	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
-
-	// Simulate a previously shifted window around an outdated anchor.
-	s.anchor = decimal.NewFromInt(90)
-	s.minLevel = 0
-	s.maxLevel = 6
-
-	t0 := time.Unix(10, 0).UTC()
-	changed := false
-	changedPrice := decimal.Zero
-	for i, px := range []int64{101, 102, 103, 104, 105, 106} {
-		changedPrice = decimal.NewFromInt(px)
-		err := s.OnTick(context.Background(), changedPrice, t0.Add(time.Duration(i+1)*time.Minute))
-		if err != nil {
-			t.Fatalf("OnTick() error = %v", err)
-		}
-		if s.regimeState == RegimeTrendUp {
-			changed = true
-			break
-		}
-	}
-	if !changed {
-		t.Fatalf("regime did not switch to trend_up")
-	}
-	if !s.anchor.Equal(changedPrice) {
-		t.Fatalf("anchor = %s, want %s after rebuild", s.anchor, changedPrice)
-	}
-	if s.minLevel != -3 || s.maxLevel != 1 {
-		t.Fatalf("window = [%d,%d], want [-3,1] after rebuild", s.minLevel, s.maxLevel)
-	}
-	if hasAnyOpenOrderAtLevel(s, 2) {
-		t.Fatalf("unexpected order above reset top level")
-	}
-}
-
-func TestSpotDualOnTickRegimeRebuildDoesNotMarketBuyBase(t *testing.T) {
-	s, exec := newSpotDualForTest(3, 1, "0")
-	s.SetRegimeControl(RegimeControlConfig{
-		Enabled:               true,
-		Window:                5,
-		EnterScore:            0.1,
-		ExitScore:             0.05,
-		EnterConfirm:          1,
-		ExitConfirm:           1,
-		TrendUpBuySpacingMult: 0.5,
-	})
-	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
-	exec.balance.Base = decimal.Zero
-	placedBefore := len(exec.placed)
-
-	t0 := time.Unix(100, 0).UTC()
-	changed := false
-	for i, px := range []int64{101, 102, 103, 104, 105, 106} {
-		err := s.OnTick(context.Background(), decimal.NewFromInt(px), t0.Add(time.Duration(i+1)*time.Minute))
-		if err != nil {
-			t.Fatalf("OnTick() error = %v", err)
-		}
-		if s.regimeState == RegimeTrendUp {
-			changed = true
-			break
-		}
-	}
-	if !changed {
-		t.Fatalf("regime did not switch to trend_up")
-	}
-
-	marketBuyPlaced := 0
-	for _, ord := range exec.placed[placedBefore:] {
-		if ord.Type == core.Market && ord.Side == core.Buy {
-			marketBuyPlaced++
-		}
-	}
-	if marketBuyPlaced != 0 {
-		t.Fatalf("market buy count during regime rebuild = %d, want 0", marketBuyPlaced)
-	}
-}
-
-func TestSpotDualOnTickRegimeRebuildToleratesInsufficientQuote(t *testing.T) {
-	exec := &insufficientDuringRebuildExecutor{
-		fakeExecutor: fakeExecutor{
-			balance: core.Balance{
-				Base:  decimal.RequireFromString("10"),
-				Quote: decimal.RequireFromString("1000000"),
-			},
-		},
-	}
-	s := NewSpotDual(
-		"BTCUSDT",
-		decimal.Zero,
-		decimal.RequireFromString("1.1"),
-		3,
-		1,
-		decimal.NewFromInt(1),
-		1,
-		core.Rules{},
-		nil,
-		exec,
-	)
-	s.SetRegimeControl(RegimeControlConfig{
-		Enabled:               true,
-		Window:                5,
-		EnterScore:            0.1,
-		ExitScore:             0.05,
-		EnterConfirm:          1,
-		ExitConfirm:           1,
-		TrendUpBuySpacingMult: 0.5,
-	})
-	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
-
-	exec.balance.Base = decimal.RequireFromString("10")
-	exec.failBuyLimit = true
-
-	t0 := time.Unix(200, 0).UTC()
-	changed := false
-	for i, px := range []int64{101, 102, 103, 104, 105, 106} {
-		err := s.OnTick(context.Background(), decimal.NewFromInt(px), t0.Add(time.Duration(i+1)*time.Minute))
-		if err != nil {
-			t.Fatalf("OnTick() error = %v", err)
-		}
-		if s.regimeState == RegimeTrendUp {
-			changed = true
-			break
-		}
-	}
-	if !changed {
-		t.Fatalf("regime did not switch to trend_up")
-	}
-	if len(s.openOrders) == 0 {
-		t.Fatalf("expected partial rebuild to keep sell orders when buy placement is skipped")
 	}
 }
 
