@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/shopspring/decimal"
 )
 
 func TestLoadDefaultsGridModeToGeometric(t *testing.T) {
@@ -39,6 +41,9 @@ backtest:
 	}
 	if !cfg.Grid.SellRatio.Equal(cfg.Grid.Ratio.Decimal) {
 		t.Fatalf("grid.sell_ratio = %s, want %s", cfg.Grid.SellRatio.String(), cfg.Grid.Ratio.String())
+	}
+	if cfg.Grid.RatioStep != nil {
+		t.Fatalf("grid.ratio_step = %v, want nil when omitted", cfg.Grid.RatioStep)
 	}
 	if cfg.Exchange.UserStreamKeepaliveSec != 30 {
 		t.Fatalf("exchange.user_stream_keepalive_sec = %d, want 30", cfg.Exchange.UserStreamKeepaliveSec)
@@ -191,6 +196,115 @@ backtest:
 	}
 	if !strings.Contains(err.Error(), "grid sell_ratio must be > 1") {
 		t.Fatalf("Load() error = %q, want sell_ratio validation", err.Error())
+	}
+}
+
+func TestLoadRejectsInvalidRatioStep(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+mode: backtest
+symbol: BTCUSDT
+
+grid:
+  ratio: "1.01"
+  ratio_step: "-0.001"
+  levels: 20
+  qty: "0.001"
+
+backtest:
+  data_path: data/binance/BTCUSDT/1m
+  initial_base: "0"
+  initial_quote: "1000"
+  fees:
+    maker_rate: "0"
+    taker_rate: "0"
+  rules:
+    min_qty: "0"
+    min_notional: "0"
+    price_tick: "0"
+    qty_step: "0"
+`)
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatalf("Load() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "grid ratio_step must be >= 0") {
+		t.Fatalf("Load() error = %q, want ratio_step validation", err.Error())
+	}
+}
+
+func TestLoadAllowsZeroRatioStep(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+mode: backtest
+symbol: BTCUSDT
+
+grid:
+  ratio: "1.01"
+  ratio_step: "0"
+  levels: 20
+  qty: "0.001"
+
+backtest:
+  data_path: data/binance/BTCUSDT/1m
+  initial_base: "0"
+  initial_quote: "1000"
+  fees:
+    maker_rate: "0"
+    taker_rate: "0"
+  rules:
+    min_qty: "0"
+    min_notional: "0"
+    price_tick: "0"
+    qty_step: "0"
+`)
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if cfg.Grid.RatioStep == nil {
+		t.Fatalf("grid.ratio_step = nil, want explicit zero")
+	}
+	if !cfg.Grid.RatioStep.Equal(decimal.Zero) {
+		t.Fatalf("grid.ratio_step = %s, want 0", cfg.Grid.RatioStep.String())
+	}
+}
+
+func TestLoadParsesPositiveRatioStep(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+mode: backtest
+symbol: BTCUSDT
+
+grid:
+  ratio: "1.01"
+  ratio_step: "0.0025"
+  levels: 20
+  qty: "0.001"
+
+backtest:
+  data_path: data/binance/BTCUSDT/1m
+  initial_base: "0"
+  initial_quote: "1000"
+  fees:
+    maker_rate: "0"
+    taker_rate: "0"
+  rules:
+    min_qty: "0"
+    min_notional: "0"
+    price_tick: "0"
+    qty_step: "0"
+`)
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if cfg.Grid.RatioStep == nil {
+		t.Fatalf("grid.ratio_step = nil, want explicit 0.0025")
+	}
+	want := decimal.RequireFromString("0.0025")
+	if !cfg.Grid.RatioStep.Equal(want) {
+		t.Fatalf("grid.ratio_step = %s, want %s", cfg.Grid.RatioStep.String(), want.String())
 	}
 }
 

@@ -15,6 +15,8 @@ import (
 	"grid-trading/internal/store"
 )
 
+const defaultRatioStep = "0.002"
+
 type OrderExecutor interface {
 	PlaceOrder(ctx context.Context, order core.Order) (core.Order, error)
 	CancelOrder(ctx context.Context, symbol, orderID string) error
@@ -26,6 +28,7 @@ type SpotDual struct {
 	StopPrice decimal.Decimal
 	Ratio     decimal.Decimal
 	SellRatio decimal.Decimal
+	RatioStep decimal.Decimal
 	Levels    int
 	Shift     int
 	Qty       decimal.Decimal
@@ -43,6 +46,10 @@ type SpotDual struct {
 	maxLevel    int
 	stopped     bool
 	ignoreFills map[string]struct{}
+
+	baseBuyRatio       decimal.Decimal
+	lastDownShiftPrice decimal.Decimal
+	lastDownShiftAt    time.Time
 }
 
 func NewSpotDual(symbol string, stopPrice, ratio decimal.Decimal, levels, shift int, qty decimal.Decimal, minQtyMultiple int64, rules core.Rules, store store.Persister, executor OrderExecutor) *SpotDual {
@@ -51,6 +58,7 @@ func NewSpotDual(symbol string, stopPrice, ratio decimal.Decimal, levels, shift 
 		StopPrice:      stopPrice,
 		Ratio:          ratio,
 		SellRatio:      ratio,
+		RatioStep:      decimal.RequireFromString(defaultRatioStep),
 		Levels:         levels,
 		Shift:          shift,
 		Qty:            qty,
@@ -60,6 +68,7 @@ func NewSpotDual(symbol string, stopPrice, ratio decimal.Decimal, levels, shift 
 		openOrders:     make(map[string]core.Order),
 		store:          store,
 		ignoreFills:    make(map[string]struct{}),
+		baseBuyRatio:   ratio,
 	}
 }
 
@@ -72,6 +81,9 @@ func (s *SpotDual) LoadState(state store.GridState) {
 	}
 	if state.Ratio.Cmp(decimal.NewFromInt(1)) > 0 {
 		s.Ratio = state.Ratio
+	}
+	if state.BaseRatio.Cmp(decimal.NewFromInt(1)) > 0 {
+		s.baseBuyRatio = state.BaseRatio
 	}
 	if state.SellRatio.Cmp(decimal.NewFromInt(1)) > 0 {
 		s.SellRatio = state.SellRatio
@@ -91,6 +103,12 @@ func (s *SpotDual) LoadState(state store.GridState) {
 	if state.Stopped {
 		s.stopped = true
 	}
+	if state.LastDownShiftPrice.Cmp(decimal.Zero) > 0 {
+		s.lastDownShiftPrice = state.LastDownShiftPrice
+	}
+	if !state.LastDownShiftAt.IsZero() {
+		s.lastDownShiftAt = state.LastDownShiftAt
+	}
 }
 
 func (s *SpotDual) SetAlerter(alerter alert.Alerter) {
@@ -100,6 +118,12 @@ func (s *SpotDual) SetAlerter(alerter alert.Alerter) {
 func (s *SpotDual) SetSellRatio(ratio decimal.Decimal) {
 	if ratio.Cmp(decimal.NewFromInt(1)) > 0 {
 		s.SellRatio = ratio
+	}
+}
+
+func (s *SpotDual) SetRatioStep(step decimal.Decimal) {
+	if step.Cmp(decimal.Zero) >= 0 {
+		s.RatioStep = step
 	}
 }
 
@@ -118,6 +142,9 @@ func (s *SpotDual) Init(ctx context.Context, price decimal.Decimal) error {
 	}
 	if s.Ratio.Cmp(decimal.NewFromInt(1)) <= 0 {
 		return errors.New("ratio must be > 1")
+	}
+	if s.baseBuyRatio.Cmp(decimal.NewFromInt(1)) <= 0 {
+		s.baseBuyRatio = s.Ratio
 	}
 	if s.SellRatio.Cmp(decimal.NewFromInt(1)) <= 0 {
 		s.SellRatio = s.Ratio
@@ -310,6 +337,7 @@ func (s *SpotDual) OnFill(ctx context.Context, trade core.Trade) error {
 			return err
 		}
 		if idx == s.minLevel {
+			s.onDownShiftTriggered(trade.Price, trade.Time)
 			if err := s.extendDown(ctx); err != nil {
 				_ = s.persistSnapshot()
 				return err
@@ -341,6 +369,7 @@ func (s *SpotDual) OnTick(ctx context.Context, price decimal.Decimal, at time.Ti
 	if s.minLevel == 0 && s.maxLevel <= s.Levels {
 		s.minLevel = -s.Levels
 	}
+	s.maybeRestoreBuyRatio(price, at)
 	return nil
 }
 
@@ -436,6 +465,11 @@ func (s *SpotDual) Reset() {
 	s.openOrders = make(map[string]core.Order)
 	s.initialized = false
 	s.stopped = false
+	if s.baseBuyRatio.Cmp(decimal.NewFromInt(1)) > 0 {
+		s.Ratio = s.baseBuyRatio
+	}
+	s.lastDownShiftPrice = decimal.Zero
+	s.lastDownShiftAt = time.Time{}
 	_ = s.persistSnapshot()
 }
 
@@ -729,6 +763,70 @@ func (s *SpotDual) shiftLevels() int {
 	return s.Levels / 2
 }
 
+func (s *SpotDual) downShiftRatioStep() decimal.Decimal {
+	return s.RatioStep
+}
+
+func (s *SpotDual) downShiftRecoverAfter() time.Duration {
+	return 48 * time.Hour
+}
+
+func (s *SpotDual) onDownShiftTriggered(triggerPrice decimal.Decimal, at time.Time) {
+	if triggerPrice.Cmp(decimal.Zero) <= 0 {
+		return
+	}
+	step := s.downShiftRatioStep()
+	if step.Cmp(decimal.Zero) <= 0 {
+		return
+	}
+	if s.baseBuyRatio.Cmp(decimal.NewFromInt(1)) <= 0 && s.Ratio.Cmp(decimal.NewFromInt(1)) > 0 {
+		s.baseBuyRatio = s.Ratio
+	}
+	oldRatio := s.Ratio
+	s.Ratio = s.Ratio.Add(step)
+	s.alertImportant("buy_ratio_defense_raised", map[string]string{
+		"old_ratio":      oldRatio.String(),
+		"new_ratio":      s.Ratio.String(),
+		"trigger_price":  triggerPrice.String(),
+		"previous_price": s.lastDownShiftPrice.String(),
+	})
+	s.lastDownShiftPrice = triggerPrice
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	s.lastDownShiftAt = at
+}
+
+func (s *SpotDual) maybeRestoreBuyRatio(price decimal.Decimal, at time.Time) {
+	if s.baseBuyRatio.Cmp(decimal.NewFromInt(1)) <= 0 {
+		return
+	}
+	if s.Ratio.Cmp(s.baseBuyRatio) <= 0 {
+		return
+	}
+	if s.lastDownShiftAt.IsZero() {
+		return
+	}
+	now := at
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if now.Sub(s.lastDownShiftAt) < s.downShiftRecoverAfter() {
+		return
+	}
+	oldRatio := s.Ratio
+	s.Ratio = s.baseBuyRatio
+	if price.Cmp(decimal.Zero) > 0 {
+		s.lastDownShiftPrice = price
+	}
+	s.lastDownShiftAt = now
+	s.alertImportant("buy_ratio_defense_restored", map[string]string{
+		"old_ratio":       oldRatio.String(),
+		"new_ratio":       s.Ratio.String(),
+		"reference_price": s.lastDownShiftPrice.String(),
+	})
+}
+
 func (s *SpotDual) sellLevels() int {
 	n := s.shiftLevels()
 	if n < 1 {
@@ -842,20 +940,23 @@ func (s *SpotDual) alertImportant(event string, fields map[string]string) {
 
 func (s *SpotDual) snapshotState() store.GridState {
 	state := store.GridState{
-		Strategy:       "spot_dual",
-		Symbol:         s.Symbol,
-		Anchor:         s.anchor,
-		StopPrice:      s.StopPrice,
-		Ratio:          s.Ratio,
-		SellRatio:      s.SellRatio,
-		Levels:         s.Levels,
-		MinLevel:       s.minLevel,
-		MaxLevel:       s.maxLevel,
-		Qty:            s.Qty,
-		MinQtyMultiple: s.minQtyMultiple,
-		Rules:          s.rules,
-		Initialized:    s.initialized,
-		Stopped:        s.stopped,
+		Strategy:           "spot_dual",
+		Symbol:             s.Symbol,
+		Anchor:             s.anchor,
+		StopPrice:          s.StopPrice,
+		Ratio:              s.Ratio,
+		BaseRatio:          s.baseBuyRatio,
+		SellRatio:          s.SellRatio,
+		Levels:             s.Levels,
+		MinLevel:           s.minLevel,
+		MaxLevel:           s.maxLevel,
+		Qty:                s.Qty,
+		MinQtyMultiple:     s.minQtyMultiple,
+		Rules:              s.rules,
+		Initialized:        s.initialized,
+		Stopped:            s.stopped,
+		LastDownShiftPrice: s.lastDownShiftPrice,
+		LastDownShiftAt:    s.lastDownShiftAt,
 	}
 	if s.minLevel != 0 {
 		state.Low = s.priceForLevel(s.minLevel)

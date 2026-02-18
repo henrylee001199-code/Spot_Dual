@@ -5,6 +5,7 @@ instance_id: bot1 # used in state path and clientOrderId prefix
 grid:
   stop_price: "0" # stop strategy when market price > stop_price (0 means disabled)
   ratio: "1.012" # buy-side geometric spacing ratio, must be > 1
+  ratio_step: "0.002" # buy-ratio defense increment on each down-shift trigger (0 disables increment, omit to use default 0.002)
   sell_ratio: "1.012" # sell-side geometric spacing ratio, must be > 1
   levels: 20 # active buy levels below anchor
   shift_levels: 10 # active sell levels above anchor; also used as shift window size
