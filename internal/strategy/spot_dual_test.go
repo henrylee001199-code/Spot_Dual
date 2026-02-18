@@ -310,6 +310,166 @@ func TestSpotDualOnFillBuyAtBottomExtendsDown(t *testing.T) {
 	}
 }
 
+func TestSpotDualDownShiftDefenseRaisesBuyRatioOnEveryShift(t *testing.T) {
+	s, _ := newSpotDualForTest(3, 1, "10")
+	s.Ratio = decimal.RequireFromString("1.1")
+	s.baseBuyRatio = decimal.RequireFromString("1.1")
+	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	firstBottom, ok := findOpenOrder(s, core.Buy, s.minLevel)
+	if !ok {
+		t.Fatalf("missing first bottom buy")
+	}
+	t0 := time.Now().UTC()
+	if err := s.OnFill(context.Background(), core.Trade{
+		OrderID: firstBottom.ID,
+		Symbol:  s.Symbol,
+		Side:    core.Buy,
+		Price:   firstBottom.Price,
+		Qty:     firstBottom.Qty,
+		Time:    t0,
+	}); err != nil {
+		t.Fatalf("OnFill(first) error = %v", err)
+	}
+	if !s.Ratio.Equal(decimal.RequireFromString("1.102")) {
+		t.Fatalf("ratio after first down shift = %s, want 1.102", s.Ratio)
+	}
+
+	secondBottom, ok := findOpenOrder(s, core.Buy, s.minLevel)
+	if !ok {
+		t.Fatalf("missing second bottom buy")
+	}
+	if err := s.OnFill(context.Background(), core.Trade{
+		OrderID: secondBottom.ID,
+		Symbol:  s.Symbol,
+		Side:    core.Buy,
+		Price:   secondBottom.Price,
+		Qty:     secondBottom.Qty,
+		Time:    t0.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("OnFill(second) error = %v", err)
+	}
+	if !s.Ratio.Equal(decimal.RequireFromString("1.104")) {
+		t.Fatalf("ratio after second down shift = %s, want 1.104", s.Ratio)
+	}
+}
+
+func TestSpotDualDownShiftDefenseCanDisableRatioIncrement(t *testing.T) {
+	s, _ := newSpotDualForTest(3, 1, "10")
+	s.Ratio = decimal.RequireFromString("1.1")
+	s.baseBuyRatio = decimal.RequireFromString("1.1")
+	s.SetRatioStep(decimal.Zero)
+	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	bottom, ok := findOpenOrder(s, core.Buy, s.minLevel)
+	if !ok {
+		t.Fatalf("missing bottom buy")
+	}
+	if err := s.OnFill(context.Background(), core.Trade{
+		OrderID: bottom.ID,
+		Symbol:  s.Symbol,
+		Side:    core.Buy,
+		Price:   bottom.Price,
+		Qty:     bottom.Qty,
+		Time:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("OnFill() error = %v", err)
+	}
+	if !s.Ratio.Equal(decimal.RequireFromString("1.1")) {
+		t.Fatalf("ratio with ratio_step=0 = %s, want 1.1", s.Ratio)
+	}
+
+	secondBottom, ok := findOpenOrder(s, core.Buy, s.minLevel)
+	if !ok {
+		t.Fatalf("missing second bottom buy")
+	}
+	if err := s.OnFill(context.Background(), core.Trade{
+		OrderID: secondBottom.ID,
+		Symbol:  s.Symbol,
+		Side:    core.Buy,
+		Price:   secondBottom.Price,
+		Qty:     secondBottom.Qty,
+		Time:    time.Now().UTC().Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("OnFill(second) error = %v", err)
+	}
+	if !s.Ratio.Equal(decimal.RequireFromString("1.1")) {
+		t.Fatalf("ratio after second shift with ratio_step=0 = %s, want 1.1", s.Ratio)
+	}
+}
+
+func TestSpotDualSetRatioStepIgnoresNegativeValue(t *testing.T) {
+	s, _ := newSpotDualForTest(3, 1, "10")
+	s.Ratio = decimal.RequireFromString("1.1")
+	s.baseBuyRatio = decimal.RequireFromString("1.1")
+	s.SetRatioStep(decimal.RequireFromString("0.003"))
+	s.SetRatioStep(decimal.RequireFromString("-0.001"))
+
+	s.onDownShiftTriggered(decimal.RequireFromString("99"), time.Now().UTC())
+	if !s.Ratio.Equal(decimal.RequireFromString("1.103")) {
+		t.Fatalf("ratio after negative ratio_step override = %s, want 1.103", s.Ratio)
+	}
+}
+
+func TestSpotDualDownShiftDefenseRestoresBuyRatioAfterCooldown(t *testing.T) {
+	s, _ := newSpotDualForTest(3, 1, "10")
+	s.initialized = true
+	s.anchor = decimal.NewFromInt(100)
+	s.baseBuyRatio = decimal.RequireFromString("1.1")
+	s.Ratio = decimal.RequireFromString("1.103")
+	s.SellRatio = decimal.RequireFromString("1.1")
+	s.maxLevel = 1
+	s.minLevel = -3
+	base := s.baseBuyRatio
+	now := time.Now().UTC()
+	s.lastDownShiftAt = now
+
+	if err := s.OnTick(context.Background(), decimal.NewFromInt(100), now.Add(47*time.Hour)); err != nil {
+		t.Fatalf("OnTick(before cooldown) error = %v", err)
+	}
+	if !s.Ratio.Equal(decimal.RequireFromString("1.103")) {
+		t.Fatalf("ratio before cooldown = %s, want 1.103", s.Ratio)
+	}
+
+	if err := s.OnTick(context.Background(), decimal.NewFromInt(100), now.Add(49*time.Hour)); err != nil {
+		t.Fatalf("OnTick(after cooldown) error = %v", err)
+	}
+	if !s.Ratio.Equal(base) {
+		t.Fatalf("ratio after cooldown = %s, want %s", s.Ratio, base)
+	}
+	if s.lastDownShiftAt.IsZero() {
+		t.Fatalf("lastDownShiftAt should record restore time")
+	}
+	if !s.lastDownShiftPrice.Equal(decimal.NewFromInt(100)) {
+		t.Fatalf("lastDownShiftPrice = %s, want 100", s.lastDownShiftPrice)
+	}
+}
+
+func TestSpotDualDownShiftDefenseAfterRestoreRaisesOnNextShift(t *testing.T) {
+	s, _ := newSpotDualForTest(3, 1, "10")
+	s.baseBuyRatio = decimal.RequireFromString("1.1")
+	s.Ratio = decimal.RequireFromString("1.103")
+	now := time.Now().UTC()
+	s.lastDownShiftAt = now.Add(-49 * time.Hour)
+
+	s.maybeRestoreBuyRatio(decimal.RequireFromString("100"), now)
+	if !s.Ratio.Equal(decimal.RequireFromString("1.1")) {
+		t.Fatalf("ratio after restore = %s, want 1.1", s.Ratio)
+	}
+	if !s.lastDownShiftPrice.Equal(decimal.RequireFromString("100")) {
+		t.Fatalf("lastDownShiftPrice after restore = %s, want 100", s.lastDownShiftPrice)
+	}
+
+	s.onDownShiftTriggered(decimal.RequireFromString("99"), now.Add(time.Minute))
+	if !s.Ratio.Equal(decimal.RequireFromString("1.102")) {
+		t.Fatalf("ratio after new low trigger = %s, want 1.102", s.Ratio)
+	}
+}
+
 func TestSpotDualShiftUpCancelFailureKeepsFailedOrderTracked(t *testing.T) {
 	s, exec := newSpotDualForTest(3, 1, "10")
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {

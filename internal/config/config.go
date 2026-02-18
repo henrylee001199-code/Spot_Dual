@@ -47,6 +47,7 @@ type Config struct {
 type GridConfig struct {
 	StopPrice      Decimal  `yaml:"stop_price"`
 	Ratio          Decimal  `yaml:"ratio"`
+	RatioStep      *Decimal `yaml:"ratio_step"`
 	SellRatio      Decimal  `yaml:"sell_ratio"`
 	Levels         int      `yaml:"levels"`
 	ShiftLevels    int      `yaml:"shift_levels"`
@@ -299,6 +300,9 @@ func (c Config) Validate() error {
 	}
 	if c.Grid.SellRatio.Cmp(decimal.NewFromInt(1)) <= 0 {
 		return fmt.Errorf("grid sell_ratio must be > 1")
+	}
+	if c.Grid.RatioStep != nil && c.Grid.RatioStep.Cmp(decimal.Zero) < 0 {
+		return fmt.Errorf("grid ratio_step must be >= 0")
 	}
 	if c.Grid.Qty.Cmp(decimal.Zero) <= 0 {
 		return fmt.Errorf("qty must be > 0")

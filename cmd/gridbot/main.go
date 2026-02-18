@@ -204,4 +204,7 @@ func applySpotDualTuning(strat *strategy.SpotDual, cfg config.Config) {
 		return
 	}
 	strat.SetSellRatio(cfg.Grid.SellRatio.Decimal)
+	if cfg.Grid.RatioStep != nil {
+		strat.SetRatioStep(cfg.Grid.RatioStep.Decimal)
+	}
 }

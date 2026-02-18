@@ -415,6 +415,9 @@ func runBootstrapDistributionCheck(ctx context.Context, cfg config.Config, clien
 		client,
 	)
 	strat.SetSellRatio(cfg.Grid.SellRatio.Decimal)
+	if cfg.Grid.RatioStep != nil {
+		strat.SetRatioStep(cfg.Grid.RatioStep.Decimal)
+	}
 	initErr := strat.Init(ctx, anchor)
 
 	after, err := client.OpenOrders(ctx, cfg.Symbol)

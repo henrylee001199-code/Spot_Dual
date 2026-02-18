@@ -15,22 +15,25 @@ import (
 )
 
 type GridState struct {
-	Strategy       string          `json:"strategy"`
-	Symbol         string          `json:"symbol"`
-	Anchor         decimal.Decimal `json:"anchor"`
-	Low            decimal.Decimal `json:"low"`
-	StopPrice      decimal.Decimal `json:"stop_price"`
-	Ratio          decimal.Decimal `json:"ratio"`
-	SellRatio      decimal.Decimal `json:"sell_ratio,omitempty"`
-	Levels         int             `json:"levels"`
-	MinLevel       int             `json:"min_level"`
-	MaxLevel       int             `json:"max_level"`
-	Qty            decimal.Decimal `json:"qty"`
-	MinQtyMultiple int64           `json:"min_qty_multiple"`
-	Rules          core.Rules      `json:"rules"`
-	Initialized    bool            `json:"initialized"`
-	Stopped        bool            `json:"stopped"`
-	UpdatedAt      time.Time       `json:"updated_at"`
+	Strategy           string          `json:"strategy"`
+	Symbol             string          `json:"symbol"`
+	Anchor             decimal.Decimal `json:"anchor"`
+	Low                decimal.Decimal `json:"low"`
+	StopPrice          decimal.Decimal `json:"stop_price"`
+	Ratio              decimal.Decimal `json:"ratio"`
+	BaseRatio          decimal.Decimal `json:"base_ratio,omitempty"`
+	SellRatio          decimal.Decimal `json:"sell_ratio,omitempty"`
+	Levels             int             `json:"levels"`
+	MinLevel           int             `json:"min_level"`
+	MaxLevel           int             `json:"max_level"`
+	Qty                decimal.Decimal `json:"qty"`
+	MinQtyMultiple     int64           `json:"min_qty_multiple"`
+	Rules              core.Rules      `json:"rules"`
+	Initialized        bool            `json:"initialized"`
+	Stopped            bool            `json:"stopped"`
+	LastDownShiftPrice decimal.Decimal `json:"last_down_shift_price,omitempty"`
+	LastDownShiftAt    time.Time       `json:"last_down_shift_at,omitempty"`
+	UpdatedAt          time.Time       `json:"updated_at"`
 }
 
 type RuntimeStatus struct {
