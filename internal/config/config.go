@@ -45,15 +45,16 @@ type Config struct {
 }
 
 type GridConfig struct {
-	StopPrice      Decimal  `yaml:"stop_price"`
-	Ratio          Decimal  `yaml:"ratio"`
-	RatioStep      *Decimal `yaml:"ratio_step"`
-	SellRatio      Decimal  `yaml:"sell_ratio"`
-	Levels         int      `yaml:"levels"`
-	ShiftLevels    int      `yaml:"shift_levels"`
-	Mode           GridMode `yaml:"mode"`
-	Qty            Decimal  `yaml:"qty"`
-	MinQtyMultiple int64    `yaml:"min_qty_multiple"`
+	StopPrice        Decimal  `yaml:"stop_price"`
+	Ratio            Decimal  `yaml:"ratio"`
+	RatioStep        *Decimal `yaml:"ratio_step"`
+	RatioQtyMultiple Decimal  `yaml:"ratio_qty_multiple"`
+	SellRatio        Decimal  `yaml:"sell_ratio"`
+	Levels           int      `yaml:"levels"`
+	ShiftLevels      int      `yaml:"shift_levels"`
+	Mode             GridMode `yaml:"mode"`
+	Qty              Decimal  `yaml:"qty"`
+	MinQtyMultiple   int64    `yaml:"min_qty_multiple"`
 }
 
 type BacktestConfig struct {
@@ -186,6 +187,9 @@ func (c *Config) applyDefaults() {
 	if c.Grid.SellRatio.Cmp(decimal.Zero) == 0 {
 		c.Grid.SellRatio = c.Grid.Ratio
 	}
+	if c.Grid.RatioQtyMultiple.Cmp(decimal.Zero) == 0 {
+		c.Grid.RatioQtyMultiple = Decimal{Decimal: decimal.NewFromInt(1)}
+	}
 	if c.Grid.ShiftLevels == 0 && c.Grid.Levels > 0 {
 		c.Grid.ShiftLevels = c.Grid.Levels / 2
 		if c.Grid.ShiftLevels < 1 {
@@ -303,6 +307,9 @@ func (c Config) Validate() error {
 	}
 	if c.Grid.RatioStep != nil && c.Grid.RatioStep.Cmp(decimal.Zero) < 0 {
 		return fmt.Errorf("grid ratio_step must be >= 0")
+	}
+	if c.Grid.RatioQtyMultiple.Cmp(decimal.Zero) <= 0 {
+		return fmt.Errorf("grid ratio_qty_multiple must be > 0")
 	}
 	if c.Grid.Qty.Cmp(decimal.Zero) <= 0 {
 		return fmt.Errorf("qty must be > 0")

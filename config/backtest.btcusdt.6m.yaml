@@ -5,6 +5,7 @@ instance_id: bt1
 grid:
   ratio: "1.009"
   ratio_step: "0.0025"
+  ratio_qty_multiple: "1.2"
   levels: 20
   shift_levels: 12
   mode: geometric
