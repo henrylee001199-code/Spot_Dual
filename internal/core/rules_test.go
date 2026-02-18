@@ -1,7 +1,6 @@
 package core
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/shopspring/decimal"
@@ -46,9 +45,12 @@ func TestNormalizeOrderBelowMinQty(t *testing.T) {
 		MinQty: decimal.RequireFromString("0.01"),
 	}
 
-	_, err := NormalizeOrder(order, rules)
-	if !errors.Is(err, ErrBelowMinQty) {
-		t.Fatalf("NormalizeOrder() error = %v, want %v", err, ErrBelowMinQty)
+	got, err := NormalizeOrder(order, rules)
+	if err != nil {
+		t.Fatalf("NormalizeOrder() error = %v", err)
+	}
+	if !got.Qty.Equal(decimal.RequireFromString("0.01")) {
+		t.Fatalf("NormalizeOrder() qty = %s, want 0.01", got.Qty)
 	}
 }
 
@@ -64,9 +66,12 @@ func TestNormalizeOrderLimitBelowMinNotional(t *testing.T) {
 		MinNotional: decimal.RequireFromString("6"),
 	}
 
-	_, err := NormalizeOrder(order, rules)
-	if !errors.Is(err, ErrBelowMinNotional) {
-		t.Fatalf("NormalizeOrder() error = %v, want %v", err, ErrBelowMinNotional)
+	got, err := NormalizeOrder(order, rules)
+	if err != nil {
+		t.Fatalf("NormalizeOrder() error = %v", err)
+	}
+	if !got.Qty.Equal(decimal.RequireFromString("0.06")) {
+		t.Fatalf("NormalizeOrder() qty = %s, want 0.06", got.Qty)
 	}
 }
 
@@ -93,7 +98,11 @@ func TestNormalizeOrderMarketMinNotionalRules(t *testing.T) {
 		Price:  decimal.RequireFromString("50"),
 		Qty:    decimal.RequireFromString("1"),
 	}
-	if _, err := NormalizeOrder(withPriceMarket, rules); !errors.Is(err, ErrBelowMinNotional) {
-		t.Fatalf("NormalizeOrder() market with price error = %v, want %v", err, ErrBelowMinNotional)
+	got, err := NormalizeOrder(withPriceMarket, rules)
+	if err != nil {
+		t.Fatalf("NormalizeOrder() market with price error = %v", err)
+	}
+	if !got.Qty.Equal(decimal.RequireFromString("1.2")) {
+		t.Fatalf("NormalizeOrder() market qty = %s, want 1.2", got.Qty)
 	}
 }

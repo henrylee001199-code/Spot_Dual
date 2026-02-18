@@ -23,18 +23,13 @@ func NormalizeOrder(order Order, rules Rules) (Order, error) {
 		return order, ErrInvalidOrder
 	}
 	if rules.MinQty.Cmp(decimal.Zero) > 0 && order.Qty.Cmp(rules.MinQty) < 0 {
-		return order, ErrBelowMinQty
+		order.Qty = rules.MinQty
 	}
 	if order.Type == Market {
 		if order.Price.Cmp(decimal.Zero) <= 0 {
 			return order, nil
 		}
-		if rules.MinNotional.Cmp(decimal.Zero) > 0 {
-			notional := order.Price.Mul(order.Qty)
-			if notional.Cmp(rules.MinNotional) < 0 {
-				return order, ErrBelowMinNotional
-			}
-		}
+		order.Qty = ensureMinNotionalQty(order.Price, order.Qty, rules)
 		return order, nil
 	}
 	if order.Price.Cmp(decimal.Zero) <= 0 {
@@ -46,13 +41,35 @@ func NormalizeOrder(order Order, rules Rules) (Order, error) {
 	if order.Price.Cmp(decimal.Zero) <= 0 {
 		return order, ErrInvalidOrder
 	}
-	if rules.MinNotional.Cmp(decimal.Zero) > 0 {
-		notional := order.Price.Mul(order.Qty)
+	order.Qty = ensureMinNotionalQty(order.Price, order.Qty, rules)
+	return order, nil
+}
+
+func ensureMinNotionalQty(price, qty decimal.Decimal, rules Rules) decimal.Decimal {
+	out := qty
+	if rules.MinNotional.Cmp(decimal.Zero) > 0 && price.Cmp(decimal.Zero) > 0 {
+		notional := price.Mul(out)
 		if notional.Cmp(rules.MinNotional) < 0 {
-			return order, ErrBelowMinNotional
+			minQtyForNotional := rules.MinNotional.Div(price)
+			if minQtyForNotional.Cmp(out) > 0 {
+				out = minQtyForNotional
+			}
 		}
 	}
-	return order, nil
+	if rules.MinQty.Cmp(decimal.Zero) > 0 && out.Cmp(rules.MinQty) < 0 {
+		out = rules.MinQty
+	}
+	if rules.QtyStep.Cmp(decimal.Zero) > 0 {
+		out = roundUp(out, rules.QtyStep)
+	}
+	return out
+}
+
+func roundUp(value, step decimal.Decimal) decimal.Decimal {
+	if step.Cmp(decimal.Zero) <= 0 {
+		return value
+	}
+	return value.Div(step).Ceil().Mul(step)
 }
 
 func RoundDown(value, step decimal.Decimal) decimal.Decimal {
