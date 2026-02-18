@@ -52,6 +52,7 @@ type GridConfig struct {
 	ShiftLevels    int              `yaml:"shift_levels"`
 	Mode           GridMode         `yaml:"mode"`
 	Qty            Decimal          `yaml:"qty"`
+	QtyScale       Decimal          `yaml:"qty_scale"`
 	MinQtyMultiple int64            `yaml:"min_qty_multiple"`
 	Regime         GridRegimeConfig `yaml:"regime"`
 }
@@ -110,10 +111,12 @@ type StateConfig struct {
 }
 
 type CircuitBreakerConfig struct {
-	Enabled              bool `yaml:"enabled"`
-	MaxPlaceFailures     int  `yaml:"max_place_failures"`
-	MaxCancelFailures    int  `yaml:"max_cancel_failures"`
-	MaxReconnectFailures int  `yaml:"max_reconnect_failures"`
+	Enabled              bool  `yaml:"enabled"`
+	MaxPlaceFailures     int   `yaml:"max_place_failures"`
+	MaxCancelFailures    int   `yaml:"max_cancel_failures"`
+	MaxReconnectFailures int   `yaml:"max_reconnect_failures"`
+	ReconnectCooldownSec int64 `yaml:"reconnect_cooldown_sec"`
+	ReconnectProbePasses int   `yaml:"reconnect_probe_passes"`
 }
 
 type ObservabilityConfig struct {
@@ -195,6 +198,9 @@ func (c *Config) applyDefaults() {
 	if c.Grid.MinQtyMultiple == 0 {
 		c.Grid.MinQtyMultiple = 1
 	}
+	if c.Grid.QtyScale.Cmp(decimal.Zero) == 0 {
+		c.Grid.QtyScale = Decimal{Decimal: decimal.NewFromInt(1)}
+	}
 	if c.Grid.SellRatio.Cmp(decimal.Zero) == 0 {
 		c.Grid.SellRatio = c.Grid.Ratio
 	}
@@ -257,6 +263,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.CircuitBreaker.MaxReconnectFailures == 0 {
 		c.CircuitBreaker.MaxReconnectFailures = 10
+	}
+	if c.CircuitBreaker.ReconnectCooldownSec == 0 {
+		c.CircuitBreaker.ReconnectCooldownSec = 30
+	}
+	if c.CircuitBreaker.ReconnectProbePasses == 0 {
+		c.CircuitBreaker.ReconnectProbePasses = 1
 	}
 	if c.State.Dir == "" {
 		c.State.Dir = "state"
@@ -373,6 +385,9 @@ func (c Config) Validate() error {
 	if c.Grid.Qty.Cmp(decimal.Zero) <= 0 {
 		return fmt.Errorf("qty must be > 0")
 	}
+	if c.Grid.QtyScale.Cmp(decimal.Zero) <= 0 || c.Grid.QtyScale.Cmp(decimal.NewFromInt(1)) > 0 {
+		return fmt.Errorf("qty_scale must be > 0 and <= 1")
+	}
 	if c.Grid.MinQtyMultiple < 1 {
 		return fmt.Errorf("min_qty_multiple must be >= 1")
 	}
@@ -403,6 +418,12 @@ func (c Config) Validate() error {
 		}
 		if c.CircuitBreaker.MaxReconnectFailures < 1 {
 			return fmt.Errorf("circuit_breaker.max_reconnect_failures must be >= 1")
+		}
+		if c.CircuitBreaker.ReconnectCooldownSec < 1 || c.CircuitBreaker.ReconnectCooldownSec > 3600 {
+			return fmt.Errorf("circuit_breaker.reconnect_cooldown_sec must be between 1 and 3600")
+		}
+		if c.CircuitBreaker.ReconnectProbePasses < 1 || c.CircuitBreaker.ReconnectProbePasses > 20 {
+			return fmt.Errorf("circuit_breaker.reconnect_probe_passes must be between 1 and 20")
 		}
 	}
 	if c.Observability.Runtime.HeartbeatSec < 0 || c.Observability.Runtime.HeartbeatSec > 3600 {

@@ -47,6 +47,7 @@ type SpotDual struct {
 	regimeCfg   RegimeControlConfig
 	regimeState RegimeState
 	regime      *regimeDetector
+	qtyScale    decimal.Decimal
 }
 
 func NewSpotDual(symbol string, stopPrice, ratio decimal.Decimal, levels, shift int, qty decimal.Decimal, minQtyMultiple int64, rules core.Rules, store store.Persister, executor OrderExecutor) *SpotDual {
@@ -65,6 +66,7 @@ func NewSpotDual(symbol string, stopPrice, ratio decimal.Decimal, levels, shift 
 		store:          store,
 		ignoreFills:    make(map[string]struct{}),
 		regimeState:    RegimeRange,
+		qtyScale:       decimal.NewFromInt(1),
 	}
 }
 
@@ -105,6 +107,12 @@ func (s *SpotDual) SetAlerter(alerter alert.Alerter) {
 func (s *SpotDual) SetSellRatio(ratio decimal.Decimal) {
 	if ratio.Cmp(decimal.NewFromInt(1)) > 0 {
 		s.SellRatio = ratio
+	}
+}
+
+func (s *SpotDual) SetQtyScale(scale decimal.Decimal) {
+	if scale.Cmp(decimal.Zero) > 0 && scale.Cmp(decimal.NewFromInt(1)) <= 0 {
+		s.qtyScale = scale
 	}
 }
 
@@ -503,10 +511,17 @@ func (s *SpotDual) Reset() {
 }
 
 func (s *SpotDual) orderQty() decimal.Decimal {
-	if s.minQtyMultiple > 0 && s.rules.MinQty.Cmp(decimal.Zero) > 0 {
-		return s.rules.MinQty.Mul(decimal.NewFromInt(s.minQtyMultiple))
+	qty := s.Qty
+	if s.qtyScale.Cmp(decimal.Zero) > 0 && s.qtyScale.Cmp(decimal.NewFromInt(1)) < 0 {
+		qty = qty.Mul(s.qtyScale)
 	}
-	return s.Qty
+	if s.minQtyMultiple > 0 && s.rules.MinQty.Cmp(decimal.Zero) > 0 {
+		minQty := s.rules.MinQty.Mul(decimal.NewFromInt(s.minQtyMultiple))
+		if qty.Cmp(minQty) < 0 {
+			qty = minQty
+		}
+	}
+	return qty
 }
 
 func (s *SpotDual) orderQtyForSide(side core.Side) decimal.Decimal {
@@ -866,8 +881,18 @@ func (s *SpotDual) cancelBuyRange(ctx context.Context, from, to int) error {
 		if ord.GridIndex < from || ord.GridIndex > to {
 			continue
 		}
-		if err := s.executor.CancelOrder(ctx, s.Symbol, id); err != nil && firstErr == nil {
-			firstErr = err
+		if err := s.executor.CancelOrder(ctx, s.Symbol, id); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			s.alertImportant("cancel_order_failed", map[string]string{
+				"order_id": id,
+				"side":     string(ord.Side),
+				"price":    ord.Price.String(),
+				"qty":      ord.Qty.String(),
+				"err":      err.Error(),
+			})
+			continue
 		}
 		delete(s.openOrders, id)
 	}

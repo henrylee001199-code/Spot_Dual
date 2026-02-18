@@ -133,6 +133,10 @@ func main() {
 			cfg.CircuitBreaker.MaxCancelFailures,
 			cfg.CircuitBreaker.MaxReconnectFailures,
 		)
+		breaker.SetReconnectRecovery(
+			time.Duration(cfg.CircuitBreaker.ReconnectCooldownSec)*time.Second,
+			cfg.CircuitBreaker.ReconnectProbePasses,
+		)
 		breaker.SetAlerter(alerts)
 		exec := safety.NewGuardedExecutor(client, breaker)
 		strat := strategy.NewSpotDual(cfg.Symbol, cfg.Grid.StopPrice.Decimal, cfg.Grid.Ratio.Decimal, cfg.Grid.Levels, cfg.Grid.ShiftLevels, cfg.Grid.Qty.Decimal, cfg.Grid.MinQtyMultiple, rules, st, exec)
@@ -196,6 +200,7 @@ func applySpotDualTuning(strat *strategy.SpotDual, cfg config.Config) {
 		return
 	}
 	strat.SetSellRatio(cfg.Grid.SellRatio.Decimal)
+	strat.SetQtyScale(cfg.Grid.QtyScale.Decimal)
 	strat.SetRegimeControl(strategy.RegimeControlConfig{
 		Enabled:                  cfg.Grid.Regime.Enabled,
 		Window:                   cfg.Grid.Regime.Window,
