@@ -198,5 +198,17 @@ func writeJSONAtomic(path string, v any) error {
 		_ = os.Remove(tmp.Name())
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	// Best-effort directory fsync to improve rename durability across crashes.
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return nil
+	}
+	return nil
 }

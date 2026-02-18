@@ -234,6 +234,14 @@ func (u *UserStream) Trades(ctx context.Context, symbol string) (<-chan core.Tra
 		}
 	}()
 
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = u.conn.Close()
+		case <-done:
+		}
+	}()
+
 	if u.keepalive > 0 {
 		go func() {
 			ticker := time.NewTicker(u.keepalive)
