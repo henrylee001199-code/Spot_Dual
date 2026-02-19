@@ -16,6 +16,7 @@ import (
 )
 
 const defaultRatioStep = "0.002"
+const defaultRatioQtyMultiple = "1"
 
 type OrderExecutor interface {
 	PlaceOrder(ctx context.Context, order core.Order) (core.Order, error)
@@ -24,14 +25,15 @@ type OrderExecutor interface {
 }
 
 type SpotDual struct {
-	Symbol    string
-	StopPrice decimal.Decimal
-	Ratio     decimal.Decimal
-	SellRatio decimal.Decimal
-	RatioStep decimal.Decimal
-	Levels    int
-	Shift     int
-	Qty       decimal.Decimal
+	Symbol           string
+	StopPrice        decimal.Decimal
+	Ratio            decimal.Decimal
+	SellRatio        decimal.Decimal
+	RatioStep        decimal.Decimal
+	RatioQtyMultiple decimal.Decimal
+	Levels           int
+	Shift            int
+	Qty              decimal.Decimal
 
 	minQtyMultiple int64
 	rules          core.Rules
@@ -54,21 +56,22 @@ type SpotDual struct {
 
 func NewSpotDual(symbol string, stopPrice, ratio decimal.Decimal, levels, shift int, qty decimal.Decimal, minQtyMultiple int64, rules core.Rules, store store.Persister, executor OrderExecutor) *SpotDual {
 	return &SpotDual{
-		Symbol:         symbol,
-		StopPrice:      stopPrice,
-		Ratio:          ratio,
-		SellRatio:      ratio,
-		RatioStep:      decimal.RequireFromString(defaultRatioStep),
-		Levels:         levels,
-		Shift:          shift,
-		Qty:            qty,
-		minQtyMultiple: minQtyMultiple,
-		rules:          rules,
-		executor:       executor,
-		openOrders:     make(map[string]core.Order),
-		store:          store,
-		ignoreFills:    make(map[string]struct{}),
-		baseBuyRatio:   ratio,
+		Symbol:           symbol,
+		StopPrice:        stopPrice,
+		Ratio:            ratio,
+		SellRatio:        ratio,
+		RatioStep:        decimal.RequireFromString(defaultRatioStep),
+		RatioQtyMultiple: decimal.RequireFromString(defaultRatioQtyMultiple),
+		Levels:           levels,
+		Shift:            shift,
+		Qty:              qty,
+		minQtyMultiple:   minQtyMultiple,
+		rules:            rules,
+		executor:         executor,
+		openOrders:       make(map[string]core.Order),
+		store:            store,
+		ignoreFills:      make(map[string]struct{}),
+		baseBuyRatio:     ratio,
 	}
 }
 
@@ -124,6 +127,12 @@ func (s *SpotDual) SetSellRatio(ratio decimal.Decimal) {
 func (s *SpotDual) SetRatioStep(step decimal.Decimal) {
 	if step.Cmp(decimal.Zero) >= 0 {
 		s.RatioStep = step
+	}
+}
+
+func (s *SpotDual) SetRatioQtyMultiple(v decimal.Decimal) {
+	if v.Cmp(decimal.Zero) > 0 {
+		s.RatioQtyMultiple = v
 	}
 }
 
@@ -326,7 +335,7 @@ func (s *SpotDual) OnFill(ctx context.Context, trade core.Trade) error {
 			return err
 		}
 		if idx == s.maxLevel {
-			if err := s.shiftUp(ctx, idx); err != nil {
+			if err := s.shiftUp(ctx, idx, trade.Price, trade.Time); err != nil {
 				_ = s.persistSnapshot()
 				return err
 			}
@@ -347,7 +356,7 @@ func (s *SpotDual) OnFill(ctx context.Context, trade core.Trade) error {
 	return s.persistSnapshot()
 }
 
-func (s *SpotDual) OnTick(ctx context.Context, price decimal.Decimal, at time.Time) error {
+func (s *SpotDual) OnTick(ctx context.Context, price decimal.Decimal, _ time.Time) error {
 	if s.stopped {
 		return ErrStopped
 	}
@@ -369,7 +378,6 @@ func (s *SpotDual) OnTick(ctx context.Context, price decimal.Decimal, at time.Ti
 	if s.minLevel == 0 && s.maxLevel <= s.Levels {
 		s.minLevel = -s.Levels
 	}
-	s.maybeRestoreBuyRatio(price, at)
 	return nil
 }
 
@@ -547,6 +555,10 @@ func (s *SpotDual) indexForPrice(price decimal.Decimal) (int, bool) {
 }
 
 func (s *SpotDual) placeLimit(ctx context.Context, side core.Side, idx int) error {
+	return s.placeLimitWithQtyMultiple(ctx, side, idx, decimal.NewFromInt(1))
+}
+
+func (s *SpotDual) placeLimitWithQtyMultiple(ctx context.Context, side core.Side, idx int, qtyMultiple decimal.Decimal) error {
 	if idx > s.maxLevel {
 		return nil
 	}
@@ -558,6 +570,9 @@ func (s *SpotDual) placeLimit(ctx context.Context, side core.Side, idx int) erro
 		return nil
 	}
 	qty := s.orderQty()
+	if qtyMultiple.Cmp(decimal.Zero) > 0 {
+		qty = qty.Mul(qtyMultiple)
+	}
 	if qty.Cmp(decimal.Zero) <= 0 {
 		return nil
 	}
@@ -630,15 +645,16 @@ func (s *SpotDual) extendDown(ctx context.Context) error {
 	}
 	oldMin := s.minLevel
 	s.minLevel = s.minLevel - s.Levels
+	qtyMultiple := s.downShiftQtyMultiple()
 	for i := oldMin - 1; i >= s.minLevel; i-- {
-		if err := s.placeLimit(ctx, core.Buy, i); err != nil {
+		if err := s.placeLimitWithQtyMultiple(ctx, core.Buy, i, qtyMultiple); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *SpotDual) shiftUp(ctx context.Context, filledLevel int) error {
+func (s *SpotDual) shiftUp(ctx context.Context, filledLevel int, triggerPrice decimal.Decimal, at time.Time) error {
 	shift := s.shiftLevels()
 	if shift < 1 {
 		return nil
@@ -648,6 +664,7 @@ func (s *SpotDual) shiftUp(ctx context.Context, filledLevel int) error {
 	if filledLevel != oldMax {
 		return nil
 	}
+	s.restoreBuyRatioOnShiftUp(triggerPrice, at)
 	newMin := oldMin + shift
 	newMax := oldMax + shift
 	if err := s.cancelBuyRange(ctx, oldMin, oldMin+shift-1); err != nil {
@@ -767,8 +784,11 @@ func (s *SpotDual) downShiftRatioStep() decimal.Decimal {
 	return s.RatioStep
 }
 
-func (s *SpotDual) downShiftRecoverAfter() time.Duration {
-	return 48 * time.Hour
+func (s *SpotDual) downShiftQtyMultiple() decimal.Decimal {
+	if s.RatioQtyMultiple.Cmp(decimal.Zero) > 0 {
+		return s.RatioQtyMultiple
+	}
+	return decimal.RequireFromString(defaultRatioQtyMultiple)
 }
 
 func (s *SpotDual) onDownShiftTriggered(triggerPrice decimal.Decimal, at time.Time) {
@@ -797,25 +817,19 @@ func (s *SpotDual) onDownShiftTriggered(triggerPrice decimal.Decimal, at time.Ti
 	s.lastDownShiftAt = at
 }
 
-func (s *SpotDual) maybeRestoreBuyRatio(price decimal.Decimal, at time.Time) {
+func (s *SpotDual) restoreBuyRatioOnShiftUp(price decimal.Decimal, at time.Time) {
 	if s.baseBuyRatio.Cmp(decimal.NewFromInt(1)) <= 0 {
 		return
 	}
 	if s.Ratio.Cmp(s.baseBuyRatio) <= 0 {
 		return
 	}
-	if s.lastDownShiftAt.IsZero() {
-		return
-	}
+	oldRatio := s.Ratio
+	s.Ratio = s.baseBuyRatio
 	now := at
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	if now.Sub(s.lastDownShiftAt) < s.downShiftRecoverAfter() {
-		return
-	}
-	oldRatio := s.Ratio
-	s.Ratio = s.baseBuyRatio
 	if price.Cmp(decimal.Zero) > 0 {
 		s.lastDownShiftPrice = price
 	}
