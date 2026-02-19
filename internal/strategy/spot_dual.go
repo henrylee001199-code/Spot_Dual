@@ -383,13 +383,10 @@ func (s *SpotDual) OnTick(ctx context.Context, price decimal.Decimal, _ time.Tim
 
 func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrders []core.Order) error {
 	if s.stopped {
-		return ErrStopped
+		return s.reconcileStopped(ctx, openOrders)
 	}
 	if s.shouldStop(price) {
-		s.openOrders = make(map[string]core.Order, len(openOrders))
-		for _, ord := range openOrders {
-			s.openOrders[ord.ID] = ord
-		}
+		s.replaceOpenOrdersFromExchange(openOrders)
 		return s.stopNow(ctx)
 	}
 	if s.anchor.Cmp(decimal.Zero) <= 0 {
@@ -404,32 +401,112 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 	if s.minLevel == 0 && s.maxLevel <= s.Levels {
 		s.minLevel = -s.Levels
 	}
+	s.initialized = false
 
 	s.openOrders = make(map[string]core.Order)
 	levelOrders := make(map[int]core.Side)
-	lowestBuy := 0
+	levelBuckets := make(map[int][]core.Order)
 	for _, ord := range openOrders {
 		idx, ok := s.indexForPrice(ord.Price)
 		if !ok {
 			continue
 		}
 		ord.GridIndex = idx
-		s.openOrders[ord.ID] = ord
-		if _, exists := levelOrders[idx]; !exists {
-			levelOrders[idx] = ord.Side
+		levelBuckets[idx] = append(levelBuckets[idx], ord)
+	}
+
+	levels := make([]int, 0, len(levelBuckets))
+	for idx := range levelBuckets {
+		levels = append(levels, idx)
+	}
+	sort.Ints(levels)
+
+	for _, idx := range levels {
+		ordersAtLevel := levelBuckets[idx]
+		keepIdx := primaryOrderIndex(ordersAtLevel)
+		keep := ordersAtLevel[keepIdx]
+		if keep.ID != "" {
+			s.openOrders[keep.ID] = keep
 		}
-		if ord.Side == core.Buy {
-			if lowestBuy == 0 || idx < lowestBuy {
-				lowestBuy = idx
+		levelOrders[idx] = keep.Side
+
+		for i, ord := range ordersAtLevel {
+			if i == keepIdx || ord.ID == "" {
+				continue
 			}
+			if err := s.executor.CancelOrder(ctx, s.Symbol, ord.ID); err != nil {
+				s.alertImportant("reconcile_duplicate_order_cancel_failed", map[string]string{
+					"order_id": idOrPlaceholder(ord.ID),
+					"side":     string(ord.Side),
+					"price":    ord.Price.String(),
+					"qty":      ord.Qty.String(),
+					"level":    strconv.Itoa(idx),
+					"err":      err.Error(),
+				})
+				_ = s.persistSnapshot()
+				return err
+			}
+			s.alertImportant("reconcile_duplicate_order_canceled", map[string]string{
+				"order_id": idOrPlaceholder(ord.ID),
+				"side":     string(ord.Side),
+				"price":    ord.Price.String(),
+				"qty":      ord.Qty.String(),
+				"level":    strconv.Itoa(idx),
+				"kept_id":  idOrPlaceholder(keep.ID),
+			})
+		}
+	}
+
+	lowestBuy := 0
+	for _, ord := range s.openOrders {
+		if ord.Side != core.Buy {
+			continue
+		}
+		if lowestBuy == 0 || ord.GridIndex < lowestBuy {
+			lowestBuy = ord.GridIndex
 		}
 	}
 	if lowestBuy != 0 && lowestBuy < s.minLevel {
 		s.minLevel = lowestBuy
 	}
 
+	missingSellLevels := make([]int, 0)
 	for i := 1; i <= s.maxLevel; i++ {
-		if _, exists := levelOrders[i]; exists {
+		side, exists := levelOrders[i]
+		if !exists {
+			missingSellLevels = append(missingSellLevels, i)
+			continue
+		}
+		if side != core.Sell {
+			continue
+		}
+	}
+	if len(missingSellLevels) > 0 {
+		buyQty, err := s.shiftBuyNeed(ctx, len(missingSellLevels))
+		if err != nil {
+			s.alertImportant("reconcile_base_buy_need_failed", map[string]string{
+				"missing_sell_levels": strconv.Itoa(len(missingSellLevels)),
+				"err":                 err.Error(),
+			})
+			_ = s.persistSnapshot()
+			return err
+		}
+		if buyQty.Cmp(decimal.Zero) > 0 {
+			if err := s.placeMarketBuy(ctx, buyQty); err != nil {
+				s.alertImportant("reconcile_base_buy_failed", map[string]string{
+					"missing_sell_levels": strconv.Itoa(len(missingSellLevels)),
+					"qty":                 buyQty.String(),
+					"err":                 err.Error(),
+				})
+				_ = s.persistSnapshot()
+				return err
+			}
+		}
+	}
+
+	for i := 1; i <= s.maxLevel; i++ {
+		side, exists := levelOrders[i]
+		if exists && side == core.Sell {
 			continue
 		}
 		if err := s.placeLimit(ctx, core.Sell, i); err != nil {
@@ -441,10 +518,13 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 			_ = s.persistSnapshot()
 			return err
 		}
-		levelOrders[i] = core.Sell
+		if s.hasOrderLevelWithSide(core.Sell, i) {
+			levelOrders[i] = core.Sell
+		}
 	}
 	for i := -1; i >= s.minLevel; i-- {
-		if _, exists := levelOrders[i]; exists {
+		side, exists := levelOrders[i]
+		if exists && side == core.Buy {
 			continue
 		}
 		if err := s.placeLimit(ctx, core.Buy, i); err != nil {
@@ -456,7 +536,35 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 			_ = s.persistSnapshot()
 			return err
 		}
-		levelOrders[i] = core.Buy
+		if s.hasOrderLevelWithSide(core.Buy, i) {
+			levelOrders[i] = core.Buy
+		}
+	}
+
+	missingSell := 0
+	for i := 1; i <= s.maxLevel; i++ {
+		if !s.hasOrderLevelWithSide(core.Sell, i) {
+			missingSell++
+		}
+	}
+	missingBuy := 0
+	for i := -1; i >= s.minLevel; i-- {
+		if !s.hasOrderLevelWithSide(core.Buy, i) {
+			missingBuy++
+		}
+	}
+	if missingSell > 0 || missingBuy > 0 {
+		s.alertImportant("reconcile_grid_incomplete", map[string]string{
+			"missing_sell_levels": strconv.Itoa(missingSell),
+			"missing_buy_levels":  strconv.Itoa(missingBuy),
+		})
+		if err := s.persistSnapshot(); err != nil {
+			s.alertImportant("reconcile_persist_failed", map[string]string{
+				"err": err.Error(),
+			})
+			return err
+		}
+		return errors.New("reconcile incomplete grid")
 	}
 
 	s.initialized = true
@@ -467,6 +575,11 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 		return err
 	}
 	return nil
+}
+
+func (s *SpotDual) reconcileStopped(ctx context.Context, openOrders []core.Order) error {
+	s.replaceOpenOrdersFromExchange(openOrders)
+	return s.stopNow(ctx)
 }
 
 func (s *SpotDual) Reset() {
@@ -703,32 +816,49 @@ func (s *SpotDual) shouldStop(price decimal.Decimal) bool {
 }
 
 func (s *SpotDual) stopNow(ctx context.Context) error {
-	if err := s.cancelAllOpenOrders(ctx); err != nil {
-		return err
-	}
+	justStopped := !s.stopped
+	s.cancelAllOpenBuyOrders(ctx)
 	s.stopped = true
 	s.initialized = false
-	s.alertImportant("strategy_stop_price_triggered", map[string]string{
-		"symbol":     s.Symbol,
-		"stop_price": s.StopPrice.String(),
-	})
+	if justStopped {
+		s.alertImportant("strategy_stop_price_triggered", map[string]string{
+			"symbol":     s.Symbol,
+			"stop_price": s.StopPrice.String(),
+		})
+	}
 	if err := s.persistSnapshot(); err != nil {
 		return err
+	}
+	if s.hasOpenBuyOrders() {
+		return nil
 	}
 	return ErrStopped
 }
 
-func (s *SpotDual) cancelAllOpenOrders(ctx context.Context) error {
-	var firstErr error
+func (s *SpotDual) replaceOpenOrdersFromExchange(openOrders []core.Order) {
+	next := make(map[string]core.Order, len(openOrders))
+	for _, ord := range openOrders {
+		if ord.ID == "" {
+			continue
+		}
+		if idx, ok := s.indexForPrice(ord.Price); ok {
+			ord.GridIndex = idx
+		}
+		next[ord.ID] = ord
+	}
+	s.openOrders = next
+}
+
+func (s *SpotDual) cancelAllOpenBuyOrders(ctx context.Context) {
 	for id, ord := range s.openOrders {
 		if id == "" {
 			delete(s.openOrders, id)
 			continue
 		}
+		if ord.Side != core.Buy {
+			continue
+		}
 		if err := s.executor.CancelOrder(ctx, s.Symbol, id); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
 			s.alertImportant("cancel_order_failed", map[string]string{
 				"order_id": id,
 				"side":     string(ord.Side),
@@ -740,7 +870,15 @@ func (s *SpotDual) cancelAllOpenOrders(ctx context.Context) error {
 		}
 		delete(s.openOrders, id)
 	}
-	return firstErr
+}
+
+func (s *SpotDual) hasOpenBuyOrders() bool {
+	for _, ord := range s.openOrders {
+		if ord.Side == core.Buy {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *SpotDual) cancelBuyRange(ctx context.Context, from, to int) error {
@@ -904,6 +1042,55 @@ func (s *SpotDual) hasOrderLevel(idx int) bool {
 		}
 	}
 	return false
+}
+
+func (s *SpotDual) hasOrderLevelWithSide(side core.Side, idx int) bool {
+	for _, ord := range s.openOrders {
+		if ord.GridIndex == idx && ord.Side == side {
+			return true
+		}
+	}
+	return false
+}
+
+func primaryOrderIndex(orders []core.Order) int {
+	if len(orders) == 0 {
+		return 0
+	}
+	best := 0
+	for i := 1; i < len(orders); i++ {
+		if preferOrder(orders[i], orders[best]) {
+			best = i
+		}
+	}
+	return best
+}
+
+func preferOrder(a, b core.Order) bool {
+	aTimeSet := !a.CreatedAt.IsZero()
+	bTimeSet := !b.CreatedAt.IsZero()
+	if aTimeSet || bTimeSet {
+		if aTimeSet && !bTimeSet {
+			return true
+		}
+		if !aTimeSet && bTimeSet {
+			return false
+		}
+		if a.CreatedAt.Before(b.CreatedAt) {
+			return true
+		}
+		if a.CreatedAt.After(b.CreatedAt) {
+			return false
+		}
+	}
+	return a.ID < b.ID
+}
+
+func idOrPlaceholder(id string) string {
+	if id == "" {
+		return "unknown"
+	}
+	return id
 }
 
 func isOrderClosedWithoutFullFill(status core.OrderStatus) bool {

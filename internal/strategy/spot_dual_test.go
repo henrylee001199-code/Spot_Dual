@@ -71,6 +71,26 @@ func (f *insufficientDuringRebuildExecutor) PlaceOrder(ctx context.Context, orde
 	return f.fakeExecutor.PlaceOrder(ctx, order)
 }
 
+type sellCapacityExecutor struct {
+	fakeExecutor
+}
+
+func (f *sellCapacityExecutor) PlaceOrder(ctx context.Context, order core.Order) (core.Order, error) {
+	if order.Type == core.Limit && order.Side == core.Sell {
+		lockedSell := decimal.Zero
+		for _, placed := range f.placed {
+			if placed.Type == core.Limit && placed.Side == core.Sell {
+				lockedSell = lockedSell.Add(placed.Qty)
+			}
+		}
+		freeBase := f.balance.Base.Sub(lockedSell)
+		if freeBase.Cmp(order.Qty) < 0 {
+			return core.Order{}, errors.New("insufficient base balance")
+		}
+	}
+	return f.fakeExecutor.PlaceOrder(ctx, order)
+}
+
 func newSpotDualForTest(levels, shift int, baseBalance string) (*SpotDual, *fakeExecutor) {
 	exec := &fakeExecutor{
 		balance: core.Balance{
@@ -725,6 +745,148 @@ func TestSpotDualOnFillStopsAndCancelsOpenOrders(t *testing.T) {
 	}
 }
 
+func TestSpotDualStopNowCancelsOnlyBuyOrders(t *testing.T) {
+	s, exec := newSpotDualForTest(3, 2, "10")
+	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	buyIDs := make(map[string]struct{})
+	sellCount := 0
+	for id, ord := range s.openOrders {
+		if ord.Side == core.Buy {
+			buyIDs[id] = struct{}{}
+		}
+		if ord.Side == core.Sell {
+			sellCount++
+		}
+	}
+	if len(buyIDs) != 3 {
+		t.Fatalf("buy orders before stop = %d, want 3", len(buyIDs))
+	}
+	if sellCount != 2 {
+		t.Fatalf("sell orders before stop = %d, want 2", sellCount)
+	}
+
+	s.StopPrice = decimal.NewFromInt(105)
+	err := s.OnTick(context.Background(), decimal.NewFromInt(110), time.Now().UTC())
+	if !errors.Is(err, ErrStopped) {
+		t.Fatalf("OnTick() error = %v, want ErrStopped", err)
+	}
+	if !s.stopped {
+		t.Fatalf("strategy should be stopped")
+	}
+	if len(exec.canceled) != len(buyIDs) {
+		t.Fatalf("canceled orders = %d, want %d", len(exec.canceled), len(buyIDs))
+	}
+	for _, id := range exec.canceled {
+		if _, ok := buyIDs[id]; !ok {
+			t.Fatalf("canceled non-buy order id = %s", id)
+		}
+	}
+	if len(s.openOrders) != sellCount {
+		t.Fatalf("open orders after stop = %d, want %d", len(s.openOrders), sellCount)
+	}
+	for _, ord := range s.openOrders {
+		if ord.Side != core.Sell {
+			t.Fatalf("remaining order side = %s, want SELL only", ord.Side)
+		}
+	}
+}
+
+func TestSpotDualStopNowIgnoresCancelBuyErrors(t *testing.T) {
+	s, exec := newSpotDualForTest(3, 2, "10")
+	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	failedID := ""
+	for id, ord := range s.openOrders {
+		if ord.Side == core.Buy {
+			failedID = id
+			break
+		}
+	}
+	if failedID == "" {
+		t.Fatalf("missing buy order for failure case")
+	}
+	exec.cancelErrByID = map[string]error{
+		failedID: errors.New("order not found"),
+	}
+
+	s.StopPrice = decimal.NewFromInt(105)
+	err := s.OnTick(context.Background(), decimal.NewFromInt(110), time.Now().UTC())
+	if err != nil {
+		t.Fatalf("OnTick() error = %v, want nil while buy cancel is still pending", err)
+	}
+	if !s.stopped {
+		t.Fatalf("strategy should be stopped")
+	}
+	if _, ok := s.openOrders[failedID]; !ok {
+		t.Fatalf("failed cancel buy order should remain in openOrders")
+	}
+}
+
+func TestSpotDualReconcileStoppedRetriesCancelBuyOrdersUntilCleared(t *testing.T) {
+	s, exec := newSpotDualForTest(3, 2, "10")
+	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	failedID := ""
+	for id, ord := range s.openOrders {
+		if ord.Side == core.Buy {
+			failedID = id
+			break
+		}
+	}
+	if failedID == "" {
+		t.Fatalf("missing buy order for failure case")
+	}
+	exec.cancelErrByID = map[string]error{
+		failedID: errors.New("order not found"),
+	}
+
+	s.StopPrice = decimal.NewFromInt(105)
+	if err := s.OnTick(context.Background(), decimal.NewFromInt(110), time.Now().UTC()); err != nil {
+		t.Fatalf("OnTick() error = %v, want nil while buy cancel is still pending", err)
+	}
+	if _, ok := s.openOrders[failedID]; !ok {
+		t.Fatalf("failed cancel buy order should remain in openOrders")
+	}
+
+	exec.cancelErrByID = nil
+	err := s.Reconcile(context.Background(), decimal.NewFromInt(110), s.snapshotOrders())
+	if !errors.Is(err, ErrStopped) {
+		t.Fatalf("Reconcile() error = %v, want ErrStopped once all buy orders are cleared", err)
+	}
+	if _, ok := s.openOrders[failedID]; ok {
+		t.Fatalf("failed cancel buy order should be removed after successful reconcile retry")
+	}
+	for _, ord := range s.openOrders {
+		if ord.Side == core.Buy {
+			t.Fatalf("unexpected buy order after stopped reconcile: %+v", ord)
+		}
+	}
+}
+
+func TestSpotDualReconcileStoppedReturnsErrStoppedWhenNoBuyOrders(t *testing.T) {
+	s, _ := newSpotDualForTest(3, 2, "10")
+	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	for id, ord := range s.openOrders {
+		if ord.Side == core.Buy {
+			delete(s.openOrders, id)
+		}
+	}
+	s.stopped = true
+	s.initialized = false
+
+	err := s.Reconcile(context.Background(), decimal.NewFromInt(110), s.snapshotOrders())
+	if !errors.Is(err, ErrStopped) {
+		t.Fatalf("Reconcile() error = %v, want ErrStopped", err)
+	}
+}
+
 func TestSpotDualReconcileFillsOrderGaps(t *testing.T) {
 	s, exec := newSpotDualForTest(2, 1, "10")
 	s.LoadState(store.GridState{
@@ -787,6 +949,85 @@ func TestSpotDualReconcileKeepsZeroMinLevelAfterShiftedState(t *testing.T) {
 		if ord.Side == core.Buy && ord.GridIndex < 0 {
 			t.Fatalf("unexpected negative buy level after reconcile: %d", ord.GridIndex)
 		}
+	}
+}
+
+func TestSpotDualReconcileCancelsDuplicateLevelOrders(t *testing.T) {
+	s, exec := newSpotDualForTest(2, 1, "10")
+	s.LoadState(store.GridState{
+		Symbol:      "BTCUSDT",
+		Anchor:      decimal.NewFromInt(100),
+		Ratio:       decimal.RequireFromString("1.1"),
+		MinLevel:    -2,
+		MaxLevel:    2,
+		Initialized: true,
+	})
+
+	open := []core.Order{
+		{
+			ID:     "dup-sell-a",
+			Symbol: "BTCUSDT",
+			Side:   core.Sell,
+			Type:   core.Limit,
+			Price:  s.priceForLevel(1),
+			Qty:    decimal.NewFromInt(1),
+		},
+		{
+			ID:     "dup-sell-b",
+			Symbol: "BTCUSDT",
+			Side:   core.Sell,
+			Type:   core.Limit,
+			Price:  s.priceForLevel(1),
+			Qty:    decimal.NewFromInt(1),
+		},
+		{
+			ID:     "sell-2",
+			Symbol: "BTCUSDT",
+			Side:   core.Sell,
+			Type:   core.Limit,
+			Price:  s.priceForLevel(2),
+			Qty:    decimal.NewFromInt(1),
+		},
+		{
+			ID:     "buy-1",
+			Symbol: "BTCUSDT",
+			Side:   core.Buy,
+			Type:   core.Limit,
+			Price:  s.priceForLevel(-1),
+			Qty:    decimal.NewFromInt(1),
+		},
+		{
+			ID:     "buy-2",
+			Symbol: "BTCUSDT",
+			Side:   core.Buy,
+			Type:   core.Limit,
+			Price:  s.priceForLevel(-2),
+			Qty:    decimal.NewFromInt(1),
+		},
+	}
+
+	if err := s.Reconcile(context.Background(), decimal.NewFromInt(100), open); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if len(exec.canceled) != 1 {
+		t.Fatalf("canceled orders = %d, want 1", len(exec.canceled))
+	}
+	if exec.canceled[0] != "dup-sell-b" {
+		t.Fatalf("canceled order = %s, want dup-sell-b", exec.canceled[0])
+	}
+
+	if _, ok := s.openOrders["dup-sell-a"]; !ok {
+		t.Fatalf("kept duplicate leader dup-sell-a should remain")
+	}
+	if _, ok := s.openOrders["dup-sell-b"]; ok {
+		t.Fatalf("duplicate order dup-sell-b should be removed")
+	}
+	if len(s.openOrders) != 4 {
+		t.Fatalf("open orders = %d, want 4 after dedupe", len(s.openOrders))
+	}
+	if len(exec.placed) != 0 {
+		t.Fatalf("placed orders = %d, want 0", len(exec.placed))
 	}
 }
 
@@ -855,5 +1096,157 @@ func TestSpotDualPlaceLimitSkipsInsufficientBalance(t *testing.T) {
 	}
 	if len(s.openOrders) != 0 {
 		t.Fatalf("open orders = %d, want 0 when insufficient balance", len(s.openOrders))
+	}
+}
+
+func TestSpotDualReconcileBuysBaseBeforeRefillingMissingSellLevels(t *testing.T) {
+	exec := &sellCapacityExecutor{
+		fakeExecutor: fakeExecutor{
+			balance: core.Balance{
+				Base:  decimal.NewFromInt(1),
+				Quote: decimal.RequireFromString("1000000"),
+			},
+		},
+	}
+	s := NewSpotDual(
+		"BTCUSDT",
+		decimal.Zero,
+		decimal.RequireFromString("1.1"),
+		3,
+		1,
+		decimal.NewFromInt(1),
+		1,
+		core.Rules{},
+		nil,
+		exec,
+	)
+	s.LoadState(store.GridState{
+		Symbol:      "BTCUSDT",
+		Anchor:      decimal.NewFromInt(100),
+		Ratio:       decimal.RequireFromString("1.1"),
+		MinLevel:    -3,
+		MaxLevel:    2,
+		Initialized: true,
+	})
+	open := []core.Order{
+		{
+			ID:     "buy-1",
+			Symbol: "BTCUSDT",
+			Side:   core.Buy,
+			Type:   core.Limit,
+			Price:  s.priceForLevel(-1),
+			Qty:    decimal.NewFromInt(1),
+		},
+		{
+			ID:     "buy-2",
+			Symbol: "BTCUSDT",
+			Side:   core.Buy,
+			Type:   core.Limit,
+			Price:  s.priceForLevel(-2),
+			Qty:    decimal.NewFromInt(1),
+		},
+		{
+			ID:     "buy-3",
+			Symbol: "BTCUSDT",
+			Side:   core.Buy,
+			Type:   core.Limit,
+			Price:  s.priceForLevel(-3),
+			Qty:    decimal.NewFromInt(1),
+		},
+	}
+
+	if err := s.Reconcile(context.Background(), decimal.NewFromInt(100), open); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if !s.initialized {
+		t.Fatalf("strategy should be initialized after complete reconcile")
+	}
+	if _, ok := findOpenOrder(s, core.Sell, 1); !ok {
+		t.Fatalf("missing sell order at level 1 after reconcile")
+	}
+	if _, ok := findOpenOrder(s, core.Sell, 2); !ok {
+		t.Fatalf("missing sell order at level 2 after reconcile")
+	}
+
+	marketBuyCount := 0
+	for _, ord := range exec.placed {
+		if ord.Type == core.Market && ord.Side == core.Buy {
+			marketBuyCount++
+			if !ord.Qty.Equal(decimal.NewFromInt(1)) {
+				t.Fatalf("reconcile market buy qty = %s, want 1", ord.Qty)
+			}
+		}
+	}
+	if marketBuyCount != 1 {
+		t.Fatalf("reconcile market buy count = %d, want 1", marketBuyCount)
+	}
+}
+
+func TestSpotDualReconcileReturnsErrorWhenBaseBuyForMissingSellsFails(t *testing.T) {
+	exec := &insufficientDuringRebuildExecutor{
+		fakeExecutor: fakeExecutor{
+			balance: core.Balance{
+				Base:  decimal.Zero,
+				Quote: decimal.RequireFromString("1000000"),
+			},
+		},
+		failMarketBuy: true,
+	}
+	s := NewSpotDual(
+		"BTCUSDT",
+		decimal.Zero,
+		decimal.RequireFromString("1.1"),
+		3,
+		1,
+		decimal.NewFromInt(1),
+		1,
+		core.Rules{},
+		nil,
+		exec,
+	)
+	s.LoadState(store.GridState{
+		Symbol:      "BTCUSDT",
+		Anchor:      decimal.NewFromInt(100),
+		Ratio:       decimal.RequireFromString("1.1"),
+		MinLevel:    -3,
+		MaxLevel:    2,
+		Initialized: true,
+	})
+	open := []core.Order{
+		{
+			ID:     "buy-1",
+			Symbol: "BTCUSDT",
+			Side:   core.Buy,
+			Type:   core.Limit,
+			Price:  s.priceForLevel(-1),
+			Qty:    decimal.NewFromInt(1),
+		},
+		{
+			ID:     "buy-2",
+			Symbol: "BTCUSDT",
+			Side:   core.Buy,
+			Type:   core.Limit,
+			Price:  s.priceForLevel(-2),
+			Qty:    decimal.NewFromInt(1),
+		},
+		{
+			ID:     "buy-3",
+			Symbol: "BTCUSDT",
+			Side:   core.Buy,
+			Type:   core.Limit,
+			Price:  s.priceForLevel(-3),
+			Qty:    decimal.NewFromInt(1),
+		},
+	}
+
+	err := s.Reconcile(context.Background(), decimal.NewFromInt(100), open)
+	if err == nil {
+		t.Fatalf("Reconcile() error = nil, want base buy failure")
+	}
+	if s.initialized {
+		t.Fatalf("strategy should not be initialized when reconcile fails")
+	}
+	if _, ok := findOpenOrder(s, core.Sell, 1); ok {
+		t.Fatalf("unexpected sell order at level 1 when base buy failed")
 	}
 }

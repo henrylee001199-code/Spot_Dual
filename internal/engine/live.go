@@ -159,23 +159,11 @@ func (r *LiveRunner) runOnce(ctx context.Context, reconnect bool, seen *seenTrac
 		}
 	}
 
-	if reconnect || len(persisted) > 0 {
-		if err := r.resync(ctx, price, seen, persisted); err != nil {
-			return err
-		}
-	} else if err := r.Strategy.Init(ctx, price); err != nil {
+	if err := r.resync(ctx, price, seen, persisted); err != nil {
 		if errors.Is(err, strategy.ErrStopped) {
-			r.alertImportant("manual_intervention_required", map[string]string{
-				"reason": "strategy_stopped",
-				"stage":  "init",
-			})
 			return nil
 		}
-		r.alertImportant("strategy_init_failed", map[string]string{
-			"err":   err.Error(),
-			"price": price.String(),
-		})
-		return fmt.Errorf("%w: strategy init: %v", ErrFatalLocal, err)
+		return err
 	}
 
 	stream, err := r.Exchange.NewUserStream(ctx, r.Keepalive)
@@ -251,6 +239,9 @@ func (r *LiveRunner) runOnce(ctx context.Context, reconnect bool, seen *seenTrac
 			r.persistRuntimeStatus("running", startedAt, attempts, downSince, nil)
 		case <-reconcileTick:
 			if err := r.periodicReconcile(ctx, seen); err != nil {
+				if errors.Is(err, strategy.ErrStopped) {
+					return nil
+				}
 				return err
 			}
 		case <-ctx.Done():
@@ -298,11 +289,7 @@ func (r *LiveRunner) resync(ctx context.Context, price decimal.Decimal, seen *se
 	if reconciler, ok := r.Strategy.(strategy.Reconciler); ok {
 		if err := reconciler.Reconcile(ctx, price, open); err != nil {
 			if errors.Is(err, strategy.ErrStopped) {
-				r.alertImportant("manual_intervention_required", map[string]string{
-					"reason": "strategy_stopped",
-					"stage":  "reconcile",
-				})
-				return nil
+				return err
 			}
 			r.alertImportant("reconcile_gap_failed", map[string]string{
 				"err": err.Error(),
