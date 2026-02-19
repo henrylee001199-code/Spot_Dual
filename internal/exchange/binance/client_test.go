@@ -52,6 +52,25 @@ func TestParseAPIError(t *testing.T) {
 	}
 }
 
+func TestDoRequestInvalidPostMethodReturnsErrorWithoutPanic(t *testing.T) {
+	c := NewClientWithOptions(Options{
+		APIKey:      "k",
+		APISecret:   "s",
+		RestBaseURL: "http://example.com",
+	})
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("doRequest() panicked: %v", r)
+		}
+	}()
+
+	_, err := c.doRequest(context.Background(), "PO\nST", "/api/v3/order", url.Values{"symbol": {"BTCUSDT"}}, AuthNone)
+	if err == nil {
+		t.Fatalf("doRequest() error = nil, want invalid method error")
+	}
+}
+
 func TestParseSymbolInfo(t *testing.T) {
 	src := symbolInfoResponse{
 		Symbol:     "BTCUSDT",
@@ -84,6 +103,49 @@ func TestParseSymbolInfo(t *testing.T) {
 	}
 	if !info.rules.MinNotional.Equal(decimal.RequireFromString("5")) {
 		t.Fatalf("MinNotional = %s, want 5", info.rules.MinNotional)
+	}
+}
+
+func TestParseSymbolInfoNotionalFilter(t *testing.T) {
+	src := symbolInfoResponse{
+		Symbol:     "BTCUSDT",
+		BaseAsset:  "BTC",
+		QuoteAsset: "USDT",
+		Filters: []struct {
+			FilterType  string `json:"filterType"`
+			MinQty      string `json:"minQty"`
+			StepSize    string `json:"stepSize"`
+			MinNotional string `json:"minNotional"`
+			TickSize    string `json:"tickSize"`
+		}{
+			{FilterType: "NOTIONAL", MinNotional: "5"},
+		},
+	}
+	info := parseSymbolInfo(src)
+	if !info.rules.MinNotional.Equal(decimal.RequireFromString("5")) {
+		t.Fatalf("MinNotional = %s, want 5", info.rules.MinNotional)
+	}
+}
+
+func TestParseSymbolInfoKeepsStricterNotionalWhenBothFiltersExist(t *testing.T) {
+	src := symbolInfoResponse{
+		Symbol:     "BTCUSDT",
+		BaseAsset:  "BTC",
+		QuoteAsset: "USDT",
+		Filters: []struct {
+			FilterType  string `json:"filterType"`
+			MinQty      string `json:"minQty"`
+			StepSize    string `json:"stepSize"`
+			MinNotional string `json:"minNotional"`
+			TickSize    string `json:"tickSize"`
+		}{
+			{FilterType: "MIN_NOTIONAL", MinNotional: "5"},
+			{FilterType: "NOTIONAL", MinNotional: "10"},
+		},
+	}
+	info := parseSymbolInfo(src)
+	if !info.rules.MinNotional.Equal(decimal.RequireFromString("10")) {
+		t.Fatalf("MinNotional = %s, want 10", info.rules.MinNotional)
 	}
 }
 

@@ -32,6 +32,7 @@ type liveStrategySpy struct {
 	initErr        error
 	onFillErr      error
 	reconcileErr   error
+	reconcileErrs  []error
 }
 
 func (s *liveStrategySpy) Init(_ context.Context, _ decimal.Decimal) error {
@@ -65,6 +66,10 @@ func (s *liveStrategySpy) Reconcile(_ context.Context, _ decimal.Decimal, _ []co
 	s.mu.Lock()
 	s.reconcileCalls++
 	reconcileErr := s.reconcileErr
+	if len(s.reconcileErrs) > 0 {
+		reconcileErr = s.reconcileErrs[0]
+		s.reconcileErrs = s.reconcileErrs[1:]
+	}
 	s.mu.Unlock()
 	if reconcileErr != nil {
 		return reconcileErr
@@ -180,11 +185,11 @@ func TestLiveRunOnceReconnectAndResync(t *testing.T) {
 	}
 
 	initCalls, reconcileCalls, fills := strat.stats()
-	if initCalls != 1 {
-		t.Fatalf("init calls = %d, want 1", initCalls)
+	if initCalls != 0 {
+		t.Fatalf("init calls = %d, want 0", initCalls)
 	}
-	if reconcileCalls != 1 {
-		t.Fatalf("reconcile calls = %d, want 1", reconcileCalls)
+	if reconcileCalls != 2 {
+		t.Fatalf("reconcile calls = %d, want 2", reconcileCalls)
 	}
 	if len(fills) != 1 {
 		t.Fatalf("fill calls = %d, want 1", len(fills))
@@ -200,15 +205,18 @@ func TestLiveRunnerProcessesPartialAndFinalTrades(t *testing.T) {
 	asyncErrs := make(chan error, 16)
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v3/ticker/price" {
+		switch r.URL.Path {
+		case "/api/v3/ticker/price":
+			_ = writeJSON(w, http.StatusOK, map[string]string{
+				"symbol": "BTCUSDT",
+				"price":  "100",
+			})
+		case "/api/v3/openOrders":
+			_ = writeJSON(w, http.StatusOK, []any{})
+		default:
 			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
 			_ = writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-			return
 		}
-		_ = writeJSON(w, http.StatusOK, map[string]string{
-			"symbol": "BTCUSDT",
-			"price":  "100",
-		})
 	}))
 	defer rest.Close()
 
@@ -300,6 +308,81 @@ func TestLiveRunnerProcessesPartialAndFinalTrades(t *testing.T) {
 	}
 	if fills[0].TradeID == fills[1].TradeID {
 		t.Fatalf("trade ids should differ, got %q and %q", fills[0].TradeID, fills[1].TradeID)
+	}
+
+	assertNoAsyncErr(t, asyncErrs)
+}
+
+func TestLiveRunOnceExitsCleanlyWhenInitialResyncStopsStrategy(t *testing.T) {
+	asyncErrs := make(chan error, 16)
+
+	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/ticker/price":
+			_ = writeJSON(w, http.StatusOK, map[string]string{
+				"symbol": "BTCUSDT",
+				"price":  "100",
+			})
+		case "/api/v3/openOrders":
+			_ = writeJSON(w, http.StatusOK, []any{})
+		default:
+			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
+			_ = writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		}
+	}))
+	defer rest.Close()
+
+	var wsConnCount int32
+	ws := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&wsConnCount, 1)
+		upgrader := websocket.Upgrader{
+			CheckOrigin: func(*http.Request) bool { return true },
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer ws.Close()
+
+	client := binance.NewClientWithOptions(binance.Options{
+		APIKey:            "k",
+		APISecret:         "s",
+		RestBaseURL:       rest.URL,
+		WSBaseURL:         httpToWS(ws.URL),
+		Symbol:            "BTCUSDT",
+		ClientOrderPrefix: "test",
+		UserStreamAuth:    "signature",
+		HTTPTimeoutSec:    3,
+	})
+	defer client.Close()
+
+	strat := &liveStrategySpy{reconcileErr: strategy.ErrStopped}
+	runner := LiveRunner{
+		Exchange: client,
+		Strategy: strat,
+		Symbol:   "BTCUSDT",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	seen := newSeenTracker(128, time.Hour)
+	reconnectAttempts := 0
+	disconnectStartedAt := time.Time{}
+	backoff := time.Second
+
+	err := runner.runOnce(ctx, false, seen, &reconnectAttempts, &disconnectStartedAt, &backoff, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("runOnce() error = %v, want nil", err)
+	}
+
+	_, reconcileCalls, _ := strat.stats()
+	if reconcileCalls != 1 {
+		t.Fatalf("reconcile calls = %d, want 1", reconcileCalls)
+	}
+	if atomic.LoadInt32(&wsConnCount) != 0 {
+		t.Fatalf("ws connections = %d, want 0", atomic.LoadInt32(&wsConnCount))
 	}
 
 	assertNoAsyncErr(t, asyncErrs)
@@ -485,15 +568,18 @@ func TestLiveRunnerReconnectCircuitBreakerDoesNotStopRunner(t *testing.T) {
 	asyncErrs := make(chan error, 16)
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v3/ticker/price" {
+		switch r.URL.Path {
+		case "/api/v3/ticker/price":
+			_ = writeJSON(w, http.StatusOK, map[string]string{
+				"symbol": "BTCUSDT",
+				"price":  "100",
+			})
+		case "/api/v3/openOrders":
+			_ = writeJSON(w, http.StatusOK, []any{})
+		default:
 			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
 			_ = writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-			return
 		}
-		_ = writeJSON(w, http.StatusOK, map[string]string{
-			"symbol": "BTCUSDT",
-			"price":  "100",
-		})
 	}))
 	defer rest.Close()
 
@@ -537,15 +623,18 @@ func TestLiveRunnerPersistsRuntimeStatus(t *testing.T) {
 	asyncErrs := make(chan error, 16)
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v3/ticker/price" {
+		switch r.URL.Path {
+		case "/api/v3/ticker/price":
+			_ = writeJSON(w, http.StatusOK, map[string]string{
+				"symbol": "BTCUSDT",
+				"price":  "100",
+			})
+		case "/api/v3/openOrders":
+			_ = writeJSON(w, http.StatusOK, []any{})
+		default:
 			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
 			_ = writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-			return
 		}
-		_ = writeJSON(w, http.StatusOK, map[string]string{
-			"symbol": "BTCUSDT",
-			"price":  "100",
-		})
 	}))
 	defer rest.Close()
 
@@ -650,15 +739,18 @@ func TestLiveRunnerPersistsReconnectAttemptsOnCircuitTrip(t *testing.T) {
 	asyncErrs := make(chan error, 16)
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v3/ticker/price" {
+		switch r.URL.Path {
+		case "/api/v3/ticker/price":
+			_ = writeJSON(w, http.StatusOK, map[string]string{
+				"symbol": "BTCUSDT",
+				"price":  "100",
+			})
+		case "/api/v3/openOrders":
+			_ = writeJSON(w, http.StatusOK, []any{})
+		default:
 			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
 			_ = writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-			return
 		}
-		_ = writeJSON(w, http.StatusOK, map[string]string{
-			"symbol": "BTCUSDT",
-			"price":  "100",
-		})
 	}))
 	defer rest.Close()
 
@@ -844,19 +936,108 @@ func TestLiveRunOncePeriodicReconcile(t *testing.T) {
 	assertNoAsyncErr(t, asyncErrs)
 }
 
+func TestLiveRunOncePeriodicReconcileStopsCleanlyOnErrStopped(t *testing.T) {
+	asyncErrs := make(chan error, 16)
+
+	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/ticker/price":
+			_ = writeJSON(w, http.StatusOK, map[string]string{
+				"symbol": "BTCUSDT",
+				"price":  "100",
+			})
+		case "/api/v3/openOrders":
+			_ = writeJSON(w, http.StatusOK, []any{})
+		default:
+			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
+			_ = writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		}
+	}))
+	defer rest.Close()
+
+	ws := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{
+			CheckOrigin: func(*http.Request) bool { return true },
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			recordAsyncErr(asyncErrs, err)
+			return
+		}
+		defer conn.Close()
+
+		reqID, err := readWSReqID(conn)
+		if err != nil {
+			recordAsyncErr(asyncErrs, err)
+			return
+		}
+		if err := writeWSResponse(conn, reqID); err != nil {
+			recordAsyncErr(asyncErrs, err)
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}))
+	defer ws.Close()
+
+	client := binance.NewClientWithOptions(binance.Options{
+		APIKey:            "k",
+		APISecret:         "s",
+		RestBaseURL:       rest.URL,
+		WSBaseURL:         httpToWS(ws.URL),
+		Symbol:            "BTCUSDT",
+		ClientOrderPrefix: "test",
+		UserStreamAuth:    "signature",
+		HTTPTimeoutSec:    3,
+	})
+	defer client.Close()
+
+	strat := &liveStrategySpy{
+		reconcileErrs: []error{nil, strategy.ErrStopped},
+	}
+	runner := LiveRunner{
+		Exchange:  client,
+		Strategy:  strat,
+		Symbol:    "BTCUSDT",
+		Reconcile: 50 * time.Millisecond,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	seen := newSeenTracker(128, time.Hour)
+	reconnectAttempts := 0
+	disconnectStartedAt := time.Time{}
+	backoff := time.Second
+
+	err := runner.runOnce(ctx, false, seen, &reconnectAttempts, &disconnectStartedAt, &backoff, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("runOnce() error = %v, want nil", err)
+	}
+
+	_, reconcileCalls, _ := strat.stats()
+	if reconcileCalls < 2 {
+		t.Fatalf("reconcile calls = %d, want >= 2", reconcileCalls)
+	}
+
+	assertNoAsyncErr(t, asyncErrs)
+}
+
 func TestLiveRunnerStopsOnFatalLocalErrorWithoutReconnectTrip(t *testing.T) {
 	asyncErrs := make(chan error, 16)
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v3/ticker/price" {
+		switch r.URL.Path {
+		case "/api/v3/ticker/price":
+			_ = writeJSON(w, http.StatusOK, map[string]string{
+				"symbol": "BTCUSDT",
+				"price":  "100",
+			})
+		case "/api/v3/openOrders":
+			_ = writeJSON(w, http.StatusOK, []any{})
+		default:
 			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
 			_ = writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-			return
 		}
-		_ = writeJSON(w, http.StatusOK, map[string]string{
-			"symbol": "BTCUSDT",
-			"price":  "100",
-		})
 	}))
 	defer rest.Close()
 

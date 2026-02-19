@@ -379,10 +379,12 @@ func (c *Client) doRequest(ctx context.Context, method, path string, params url.
 	} else {
 		body := params.Encode()
 		req, err = http.NewRequestWithContext(ctx, method, urlStr, strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
 	if err != nil {
 		return nil, err
+	}
+	if method != http.MethodGet && method != http.MethodDelete {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
 	if auth == AuthAPIKey || auth == AuthSigned {
 		req.Header.Set("X-MBX-APIKEY", c.apiKey)

@@ -115,10 +115,13 @@ func parseSymbolInfo(src symbolInfoResponse) symbolInfo {
 					info.rules.PriceTick = v
 				}
 			}
-		case "MIN_NOTIONAL":
+		case "MIN_NOTIONAL", "NOTIONAL":
 			if f.MinNotional != "" {
 				if v, err := decimal.NewFromString(f.MinNotional); err == nil {
-					info.rules.MinNotional = v
+					// If both MIN_NOTIONAL and NOTIONAL are present, keep the stricter minimum.
+					if v.Cmp(info.rules.MinNotional) > 0 {
+						info.rules.MinNotional = v
+					}
 				}
 			}
 		}
