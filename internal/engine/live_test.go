@@ -1135,6 +1135,173 @@ func TestLiveRunnerStopsOnFatalLocalErrorWithoutReconnectTrip(t *testing.T) {
 	assertNoAsyncErr(t, asyncErrs)
 }
 
+func TestLiveRunnerLoadPersistedForResyncSkipsOnSnapshotMismatch(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+
+	orders := []core.Order{
+		{
+			ID:     "o-1",
+			Symbol: "BTCUSDT",
+			Side:   core.Buy,
+			Type:   core.Limit,
+			Price:  decimal.NewFromInt(100),
+			Qty:    decimal.NewFromInt(1),
+		},
+	}
+	if err := st.SaveGridState(store.GridState{
+		Symbol:     "BTCUSDT",
+		SnapshotID: "snap-1",
+		Anchor:     decimal.NewFromInt(100),
+	}); err != nil {
+		t.Fatalf("SaveGridState(snap-1) error = %v", err)
+	}
+	if err := st.SaveOpenOrders(orders); err != nil {
+		t.Fatalf("SaveOpenOrders() error = %v", err)
+	}
+	// Overwrite only grid state to simulate torn write (new state, old open_orders).
+	if err := st.SaveGridState(store.GridState{
+		Symbol:     "BTCUSDT",
+		SnapshotID: "snap-2",
+		Anchor:     decimal.NewFromInt(100),
+	}); err != nil {
+		t.Fatalf("SaveGridState(snap-2) error = %v", err)
+	}
+
+	runner := LiveRunner{
+		Symbol: "BTCUSDT",
+		Store:  st,
+	}
+	persisted, skip, err := runner.loadPersistedForResync(false)
+	if err != nil {
+		t.Fatalf("loadPersistedForResync() error = %v", err)
+	}
+	if !skip {
+		t.Fatalf("loadPersistedForResync() skip = false, want true")
+	}
+	if len(persisted) != 0 {
+		t.Fatalf("loadPersistedForResync() persisted count = %d, want 0", len(persisted))
+	}
+}
+
+func TestLiveRunnerLoadPersistedForResyncLoadsWhenSnapshotMatches(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+
+	orders := []core.Order{
+		{
+			ID:     "o-1",
+			Symbol: "BTCUSDT",
+			Side:   core.Buy,
+			Type:   core.Limit,
+			Price:  decimal.NewFromInt(100),
+			Qty:    decimal.NewFromInt(1),
+		},
+	}
+	if err := st.SaveGridState(store.GridState{
+		Symbol:     "BTCUSDT",
+		SnapshotID: "snap-ok",
+		Anchor:     decimal.NewFromInt(100),
+	}); err != nil {
+		t.Fatalf("SaveGridState() error = %v", err)
+	}
+	if err := st.SaveOpenOrders(orders); err != nil {
+		t.Fatalf("SaveOpenOrders() error = %v", err)
+	}
+
+	runner := LiveRunner{
+		Symbol: "BTCUSDT",
+		Store:  st,
+	}
+	persisted, skip, err := runner.loadPersistedForResync(false)
+	if err != nil {
+		t.Fatalf("loadPersistedForResync() error = %v", err)
+	}
+	if skip {
+		t.Fatalf("loadPersistedForResync() skip = true, want false")
+	}
+	if len(persisted) != 1 || persisted[0].ID != "o-1" {
+		t.Fatalf("loadPersistedForResync() persisted = %+v, want one order o-1", persisted)
+	}
+}
+
+func TestLiveRunnerShouldSkipTradeWhenLedgerHasOrderTradeID(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	trade := core.Trade{
+		OrderID: "1001",
+		TradeID: "2002",
+		Symbol:  "BTCUSDT",
+		Side:    core.Buy,
+		Price:   decimal.NewFromInt(100),
+		Qty:     decimal.NewFromInt(1),
+		Time:    time.Now().UTC(),
+	}
+	if err := st.RecordTradeLedgerKey("order:1001|trade:2002", trade.Time); err != nil {
+		t.Fatalf("RecordTradeLedgerKey() error = %v", err)
+	}
+
+	runner := LiveRunner{
+		Symbol: "BTCUSDT",
+		Store:  st,
+	}
+	seen := newSeenTracker(64, time.Hour)
+	skip, err := runner.shouldSkipTrade(trade, seen, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("shouldSkipTrade() error = %v", err)
+	}
+	if !skip {
+		t.Fatalf("shouldSkipTrade() skip = false, want true")
+	}
+}
+
+func TestLiveRunnerRecordTradeLedgerMakesTradeSkippableAcrossRestart(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.New(root)
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	trade := core.Trade{
+		OrderID: "3003",
+		TradeID: "4004",
+		Symbol:  "BTCUSDT",
+		Side:    core.Sell,
+		Price:   decimal.NewFromInt(101),
+		Qty:     decimal.NewFromInt(1),
+		Time:    time.Now().UTC(),
+	}
+
+	runner := LiveRunner{
+		Symbol: "BTCUSDT",
+		Store:  st,
+	}
+	if err := runner.recordTradeLedger(trade); err != nil {
+		t.Fatalf("recordTradeLedger() error = %v", err)
+	}
+
+	st2, err := store.New(root)
+	if err != nil {
+		t.Fatalf("store.New(second) error = %v", err)
+	}
+	runner2 := LiveRunner{
+		Symbol: "BTCUSDT",
+		Store:  st2,
+	}
+	skip, err := runner2.shouldSkipTrade(trade, nil, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("shouldSkipTrade() after restart error = %v", err)
+	}
+	if !skip {
+		t.Fatalf("shouldSkipTrade() after restart skip = false, want true")
+	}
+}
+
 type executionReportPayload struct {
 	OrderID   int64
 	TradeID   int64

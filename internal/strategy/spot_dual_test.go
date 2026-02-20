@@ -63,10 +63,10 @@ type insufficientDuringRebuildExecutor struct {
 
 func (f *insufficientDuringRebuildExecutor) PlaceOrder(ctx context.Context, order core.Order) (core.Order, error) {
 	if f.failMarketBuy && order.Type == core.Market && order.Side == core.Buy {
-		return core.Order{}, errors.New("insufficient quote balance")
+		return core.Order{}, fmt.Errorf("%w: quote balance", core.ErrInsufficientBalance)
 	}
 	if f.failBuyLimit && order.Type == core.Limit && order.Side == core.Buy {
-		return core.Order{}, errors.New("insufficient quote balance")
+		return core.Order{}, fmt.Errorf("%w: quote balance", core.ErrInsufficientBalance)
 	}
 	return f.fakeExecutor.PlaceOrder(ctx, order)
 }
@@ -85,7 +85,7 @@ func (f *sellCapacityExecutor) PlaceOrder(ctx context.Context, order core.Order)
 		}
 		freeBase := f.balance.Base.Sub(lockedSell)
 		if freeBase.Cmp(order.Qty) < 0 {
-			return core.Order{}, errors.New("insufficient base balance")
+			return core.Order{}, fmt.Errorf("%w: base balance", core.ErrInsufficientBalance)
 		}
 	}
 	return f.fakeExecutor.PlaceOrder(ctx, order)
@@ -1028,6 +1028,85 @@ func TestSpotDualReconcileCancelsDuplicateLevelOrders(t *testing.T) {
 	}
 	if len(exec.placed) != 0 {
 		t.Fatalf("placed orders = %d, want 0", len(exec.placed))
+	}
+}
+
+func TestSpotDualReconcileCancelsConflictingSideThenRefillsBySideAndLevel(t *testing.T) {
+	s, exec := newSpotDualForTest(2, 1, "10")
+	s.LoadState(store.GridState{
+		Symbol:      "BTCUSDT",
+		Anchor:      decimal.NewFromInt(100),
+		Ratio:       decimal.RequireFromString("1.1"),
+		MinLevel:    -2,
+		MaxLevel:    2,
+		Initialized: true,
+	})
+
+	open := []core.Order{
+		{
+			ID:     "conflict-buy-1",
+			Symbol: "BTCUSDT",
+			Side:   core.Buy,
+			Type:   core.Limit,
+			Price:  s.priceForLevel(1),
+			Qty:    decimal.NewFromInt(1),
+		},
+		{
+			ID:     "sell-2",
+			Symbol: "BTCUSDT",
+			Side:   core.Sell,
+			Type:   core.Limit,
+			Price:  s.priceForLevel(2),
+			Qty:    decimal.NewFromInt(1),
+		},
+		{
+			ID:     "conflict-sell-minus-1",
+			Symbol: "BTCUSDT",
+			Side:   core.Sell,
+			Type:   core.Limit,
+			Price:  s.priceForLevel(-1),
+			Qty:    decimal.NewFromInt(1),
+		},
+		{
+			ID:     "buy-minus-2",
+			Symbol: "BTCUSDT",
+			Side:   core.Buy,
+			Type:   core.Limit,
+			Price:  s.priceForLevel(-2),
+			Qty:    decimal.NewFromInt(1),
+		},
+	}
+
+	if err := s.Reconcile(context.Background(), decimal.NewFromInt(100), open); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if len(exec.canceled) != 2 {
+		t.Fatalf("canceled orders = %d, want 2", len(exec.canceled))
+	}
+	canceled := map[string]struct{}{}
+	for _, id := range exec.canceled {
+		canceled[id] = struct{}{}
+	}
+	if _, ok := canceled["conflict-buy-1"]; !ok {
+		t.Fatalf("missing canceled conflict order conflict-buy-1")
+	}
+	if _, ok := canceled["conflict-sell-minus-1"]; !ok {
+		t.Fatalf("missing canceled conflict order conflict-sell-minus-1")
+	}
+
+	for _, tc := range []struct {
+		side  core.Side
+		level int
+	}{
+		{core.Sell, 1},
+		{core.Sell, 2},
+		{core.Buy, -1},
+		{core.Buy, -2},
+	} {
+		if _, ok := findOpenOrder(s, tc.side, tc.level); !ok {
+			t.Fatalf("missing order side=%s level=%d", tc.side, tc.level)
+		}
 	}
 }
 

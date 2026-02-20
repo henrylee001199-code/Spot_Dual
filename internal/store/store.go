@@ -1,11 +1,15 @@
 package store
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +21,7 @@ import (
 type GridState struct {
 	Strategy           string          `json:"strategy"`
 	Symbol             string          `json:"symbol"`
+	SnapshotID         string          `json:"snapshot_id,omitempty"`
 	Anchor             decimal.Decimal `json:"anchor"`
 	Low                decimal.Decimal `json:"low"`
 	StopPrice          decimal.Decimal `json:"stop_price"`
@@ -34,6 +39,17 @@ type GridState struct {
 	LastDownShiftPrice decimal.Decimal `json:"last_down_shift_price,omitempty"`
 	LastDownShiftAt    time.Time       `json:"last_down_shift_at,omitempty"`
 	UpdatedAt          time.Time       `json:"updated_at"`
+}
+
+type OpenOrdersSnapshot struct {
+	SnapshotID string       `json:"snapshot_id,omitempty"`
+	Orders     []core.Order `json:"orders"`
+	UpdatedAt  time.Time    `json:"updated_at,omitempty"`
+}
+
+type TradeLedgerEntry struct {
+	Key    string    `json:"key"`
+	SeenAt time.Time `json:"seen_at"`
 }
 
 type RuntimeStatus struct {
@@ -56,9 +72,18 @@ type Persister interface {
 }
 
 type Store struct {
-	root string
-	mu   sync.Mutex
+	root               string
+	mu                 sync.Mutex
+	pendingSnapshotID  string
+	tradeLedgerLoaded  bool
+	tradeLedger        map[string]struct{}
+	tradeLedgerEntries []TradeLedgerEntry
 }
+
+const (
+	tradeLedgerMaxEntries    = 10000
+	tradeLedgerTrimToEntries = 8000
+)
 
 func New(root string) (*Store, error) {
 	if root == "" {
@@ -74,9 +99,17 @@ func (s *Store) SaveGridState(state GridState) error {
 	if state.UpdatedAt.IsZero() {
 		state.UpdatedAt = time.Now().UTC()
 	}
+	state.SnapshotID = strings.TrimSpace(state.SnapshotID)
+	if state.SnapshotID == "" {
+		state.SnapshotID = newSnapshotID(state.UpdatedAt)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return writeJSONAtomic(s.statePath(), state)
+	if err := writeJSONAtomic(s.statePath(), state); err != nil {
+		return err
+	}
+	s.pendingSnapshotID = state.SnapshotID
+	return nil
 }
 
 func (s *Store) LoadGridState() (GridState, bool, error) {
@@ -97,22 +130,44 @@ func (s *Store) LoadGridState() (GridState, bool, error) {
 func (s *Store) SaveOpenOrders(orders []core.Order) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return writeJSONAtomic(s.ordersPath(), orders)
+	now := time.Now().UTC()
+	snapshotID := strings.TrimSpace(s.pendingSnapshotID)
+	payload := OpenOrdersSnapshot{
+		SnapshotID: snapshotID,
+		Orders:     orders,
+		UpdatedAt:  now,
+	}
+	if payload.Orders == nil {
+		payload.Orders = make([]core.Order, 0)
+	}
+	if err := writeJSONAtomic(s.ordersPath(), payload); err != nil {
+		return err
+	}
+	s.pendingSnapshotID = ""
+	return nil
 }
 
 func (s *Store) LoadOpenOrders() ([]core.Order, bool, error) {
+	snapshot, ok, err := s.LoadOpenOrdersSnapshot()
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	return snapshot.Orders, true, nil
+}
+
+func (s *Store) LoadOpenOrdersSnapshot() (OpenOrdersSnapshot, bool, error) {
 	data, err := os.ReadFile(s.ordersPath())
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, false, nil
+			return OpenOrdersSnapshot{}, false, nil
 		}
-		return nil, false, err
+		return OpenOrdersSnapshot{}, false, err
 	}
-	var orders []core.Order
-	if err := json.Unmarshal(data, &orders); err != nil {
-		return nil, false, err
+	snapshot, err := decodeOpenOrdersSnapshot(data)
+	if err != nil {
+		return OpenOrdersSnapshot{}, false, err
 	}
-	return orders, true, nil
+	return snapshot, true, nil
 }
 
 func (s *Store) SaveRuntimeStatus(status RuntimeStatus) error {
@@ -167,6 +222,95 @@ func (s *Store) AppendTrade(trade core.Trade) error {
 	return f.Sync()
 }
 
+func (s *Store) HasTradeLedgerKey(key string) (bool, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.loadTradeLedgerLocked(); err != nil {
+		return false, err
+	}
+	_, ok := s.tradeLedger[key]
+	return ok, nil
+}
+
+func (s *Store) RecordTradeLedgerKey(key string, seenAt time.Time) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil
+	}
+	if seenAt.IsZero() {
+		seenAt = time.Now().UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.loadTradeLedgerLocked(); err != nil {
+		return err
+	}
+	if _, ok := s.tradeLedger[key]; ok {
+		return nil
+	}
+
+	entry := TradeLedgerEntry{
+		Key:    key,
+		SeenAt: seenAt.UTC(),
+	}
+	line, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	path := s.tradeLedgerPath()
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	s.tradeLedger[key] = struct{}{}
+	s.tradeLedgerEntries = append(s.tradeLedgerEntries, entry)
+	if len(s.tradeLedgerEntries) > tradeLedgerMaxEntries {
+		if err := s.trimTradeLedgerLocked(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) trimTradeLedgerLocked() error {
+	if len(s.tradeLedgerEntries) <= tradeLedgerMaxEntries {
+		return nil
+	}
+	keep := tradeLedgerTrimToEntries
+	if keep < 1 || keep > tradeLedgerMaxEntries {
+		keep = tradeLedgerMaxEntries
+	}
+	if keep > len(s.tradeLedgerEntries) {
+		keep = len(s.tradeLedgerEntries)
+	}
+	start := len(s.tradeLedgerEntries) - keep
+	kept := append([]TradeLedgerEntry(nil), s.tradeLedgerEntries[start:]...)
+	if err := writeJSONLinesAtomic(s.tradeLedgerPath(), kept); err != nil {
+		return err
+	}
+	s.tradeLedgerEntries = kept
+	s.tradeLedger = make(map[string]struct{}, len(kept))
+	for _, entry := range kept {
+		key := strings.TrimSpace(entry.Key)
+		if key == "" {
+			continue
+		}
+		s.tradeLedger[key] = struct{}{}
+	}
+	return nil
+}
+
 func (s *Store) statePath() string {
 	return filepath.Join(s.root, "state.json")
 }
@@ -177,6 +321,10 @@ func (s *Store) ordersPath() string {
 
 func (s *Store) runtimeStatusPath() string {
 	return filepath.Join(s.root, "runtime_status.json")
+}
+
+func (s *Store) tradeLedgerPath() string {
+	return filepath.Join(s.root, "trade_ledger.jsonl")
 }
 
 func writeJSONAtomic(path string, v any) error {
@@ -204,6 +352,39 @@ func writeJSONAtomic(path string, v any) error {
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		return err
 	}
+	return fsyncDirBestEffort(dir, path)
+}
+
+func writeJSONLinesAtomic(path string, entries []TradeLedgerEntry) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "tmp-*")
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(tmp)
+	for _, entry := range entries {
+		if err := enc.Encode(entry); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+			return err
+		}
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	return fsyncDirBestEffort(dir, path)
+}
+
+func fsyncDirBestEffort(dir, path string) error {
 	// Best-effort directory fsync to improve rename durability across crashes.
 	d, err := os.Open(dir)
 	if err != nil {
@@ -225,5 +406,83 @@ func writeJSONAtomic(path string, v any) error {
 		)
 		return nil
 	}
+	return nil
+}
+
+func decodeOpenOrdersSnapshot(data []byte) (OpenOrdersSnapshot, error) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return OpenOrdersSnapshot{}, errors.New("open orders snapshot is empty")
+	}
+	var snapshot OpenOrdersSnapshot
+	if err := json.Unmarshal(trimmed, &snapshot); err != nil {
+		return OpenOrdersSnapshot{}, err
+	}
+	if snapshot.Orders == nil {
+		snapshot.Orders = make([]core.Order, 0)
+	}
+	return snapshot, nil
+}
+
+func newSnapshotID(now time.Time) string {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return strconv.FormatInt(now.UnixNano(), 36)
+}
+
+func (s *Store) loadTradeLedgerLocked() error {
+	if s.tradeLedgerLoaded {
+		return nil
+	}
+	s.tradeLedger = make(map[string]struct{})
+	s.tradeLedgerEntries = make([]TradeLedgerEntry, 0)
+	path := s.tradeLedgerPath()
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.tradeLedgerLoaded = true
+			return nil
+		}
+		return err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 2*1024*1024)
+	loadedAt := time.Now().UTC()
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var entry TradeLedgerEntry
+		if err := json.Unmarshal(line, &entry); err != nil {
+			continue
+		}
+		key := strings.TrimSpace(entry.Key)
+		if key == "" {
+			continue
+		}
+		if _, ok := s.tradeLedger[key]; ok {
+			continue
+		}
+		entry.Key = key
+		if entry.SeenAt.IsZero() {
+			entry.SeenAt = loadedAt
+		}
+		s.tradeLedger[key] = struct{}{}
+		s.tradeLedgerEntries = append(s.tradeLedgerEntries, entry)
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if len(s.tradeLedgerEntries) > tradeLedgerMaxEntries {
+		if err := s.trimTradeLedgerLocked(); err != nil {
+			return err
+		}
+	}
+	s.tradeLedgerLoaded = true
 	return nil
 }

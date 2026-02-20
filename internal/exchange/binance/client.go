@@ -407,7 +407,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, params url.
 func parseAPIError(status int, body []byte) error {
 	var apiErr apiError
 	if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Msg != "" {
-		return APIError{Code: apiErr.Code, Msg: apiErr.Msg}
+		return wrapAPIError(apiErr.Code, apiErr.Msg)
 	}
 	return fmt.Errorf("binance http error %d: %s", status, strings.TrimSpace(string(body)))
 }

@@ -63,7 +63,7 @@ func waitForWSResponse(ctx context.Context, conn *websocket.Conn, reqID string) 
 		}
 		if resp.Status != 200 {
 			if resp.Error != nil {
-				return resp, fmt.Errorf("binance ws error %d: %s", resp.Error.Code, resp.Error.Msg)
+				return resp, wrapAPIError(resp.Error.Code, resp.Error.Msg)
 			}
 			return resp, fmt.Errorf("binance ws error status %d", resp.Status)
 		}

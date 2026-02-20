@@ -5,7 +5,6 @@ import (
 	"errors"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -404,7 +403,6 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 	s.initialized = false
 
 	s.openOrders = make(map[string]core.Order)
-	levelOrders := make(map[int]core.Side)
 	levelBuckets := make(map[int][]core.Order)
 	for _, ord := range openOrders {
 		idx, ok := s.indexForPrice(ord.Price)
@@ -428,7 +426,6 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 		if keep.ID != "" {
 			s.openOrders[keep.ID] = keep
 		}
-		levelOrders[idx] = keep.Side
 
 		for i, ord := range ordersAtLevel {
 			if i == keepIdx || ord.ID == "" {
@@ -470,15 +467,33 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 		s.minLevel = lowestBuy
 	}
 
+	for i := 1; i <= s.maxLevel; i++ {
+		if err := s.cancelConflictingOrderAtLevel(ctx, i, core.Sell); err != nil {
+			s.alertImportant("reconcile_conflict_order_cancel_failed", map[string]string{
+				"side":  string(core.Sell),
+				"level": strconv.Itoa(i),
+				"err":   err.Error(),
+			})
+			_ = s.persistSnapshot()
+			return err
+		}
+	}
+	for i := -1; i >= s.minLevel; i-- {
+		if err := s.cancelConflictingOrderAtLevel(ctx, i, core.Buy); err != nil {
+			s.alertImportant("reconcile_conflict_order_cancel_failed", map[string]string{
+				"side":  string(core.Buy),
+				"level": strconv.Itoa(i),
+				"err":   err.Error(),
+			})
+			_ = s.persistSnapshot()
+			return err
+		}
+	}
+
 	missingSellLevels := make([]int, 0)
 	for i := 1; i <= s.maxLevel; i++ {
-		side, exists := levelOrders[i]
-		if !exists {
+		if !s.hasOrderLevelWithSide(core.Sell, i) {
 			missingSellLevels = append(missingSellLevels, i)
-			continue
-		}
-		if side != core.Sell {
-			continue
 		}
 	}
 	if len(missingSellLevels) > 0 {
@@ -505,8 +520,7 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 	}
 
 	for i := 1; i <= s.maxLevel; i++ {
-		side, exists := levelOrders[i]
-		if exists && side == core.Sell {
+		if s.hasOrderLevelWithSide(core.Sell, i) {
 			continue
 		}
 		if err := s.placeLimit(ctx, core.Sell, i); err != nil {
@@ -518,13 +532,9 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 			_ = s.persistSnapshot()
 			return err
 		}
-		if s.hasOrderLevelWithSide(core.Sell, i) {
-			levelOrders[i] = core.Sell
-		}
 	}
 	for i := -1; i >= s.minLevel; i-- {
-		side, exists := levelOrders[i]
-		if exists && side == core.Buy {
+		if s.hasOrderLevelWithSide(core.Buy, i) {
 			continue
 		}
 		if err := s.placeLimit(ctx, core.Buy, i); err != nil {
@@ -535,9 +545,6 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 			})
 			_ = s.persistSnapshot()
 			return err
-		}
-		if s.hasOrderLevelWithSide(core.Buy, i) {
-			levelOrders[i] = core.Buy
 		}
 	}
 
@@ -908,6 +915,41 @@ func (s *SpotDual) cancelBuyRange(ctx context.Context, from, to int) error {
 	return firstErr
 }
 
+func (s *SpotDual) cancelConflictingOrderAtLevel(ctx context.Context, idx int, expectedSide core.Side) error {
+	for id, ord := range s.openOrders {
+		if ord.GridIndex != idx {
+			continue
+		}
+		if ord.Side == expectedSide {
+			continue
+		}
+		if id == "" {
+			delete(s.openOrders, id)
+			continue
+		}
+		if err := s.executor.CancelOrder(ctx, s.Symbol, id); err != nil {
+			s.alertImportant("cancel_order_failed", map[string]string{
+				"order_id": id,
+				"side":     string(ord.Side),
+				"price":    ord.Price.String(),
+				"qty":      ord.Qty.String(),
+				"err":      err.Error(),
+			})
+			return err
+		}
+		delete(s.openOrders, id)
+		s.alertImportant("reconcile_conflict_order_canceled", map[string]string{
+			"order_id":      id,
+			"side":          string(ord.Side),
+			"expected_side": string(expectedSide),
+			"level":         strconv.Itoa(idx),
+			"price":         ord.Price.String(),
+			"qty":           ord.Qty.String(),
+		})
+	}
+	return nil
+}
+
 func (s *SpotDual) shiftLevels() int {
 	if s.Shift > 0 {
 		return s.Shift
@@ -1103,11 +1145,7 @@ func isOrderClosedWithoutFullFill(status core.OrderStatus) bool {
 }
 
 func isInsufficientBalanceError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "insufficient quote balance") || strings.Contains(msg, "insufficient base balance")
+	return errors.Is(err, core.ErrInsufficientBalance)
 }
 
 func (s *SpotDual) persistSnapshot() error {
@@ -1115,6 +1153,7 @@ func (s *SpotDual) persistSnapshot() error {
 		return nil
 	}
 	state := s.snapshotState()
+	state.SnapshotID = strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
 	if err := s.store.SaveGridState(state); err != nil {
 		s.alertImportant("state_persist_failed", map[string]string{
 			"stage": "save_grid_state",
