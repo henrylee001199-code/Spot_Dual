@@ -3,6 +3,7 @@ package binance
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -32,9 +33,9 @@ func TestNormalizeClientOrderPrefix(t *testing.T) {
 
 func TestParseAPIError(t *testing.T) {
 	err := parseAPIError(http.StatusBadRequest, []byte(`{"code":-2010,"msg":"Duplicate order sent."}`))
-	apiErr, ok := err.(APIError)
+	apiErr, ok := AsAPIError(err)
 	if !ok {
-		t.Fatalf("parseAPIError() type = %T, want APIError", err)
+		t.Fatalf("parseAPIError() type = %T, want wrapped APIError", err)
 	}
 	if apiErr.Code != -2010 {
 		t.Fatalf("apiErr.Code = %d, want -2010", apiErr.Code)
@@ -42,13 +43,62 @@ func TestParseAPIError(t *testing.T) {
 	if apiErr.Msg != "Duplicate order sent." {
 		t.Fatalf("apiErr.Msg = %q, want %q", apiErr.Msg, "Duplicate order sent.")
 	}
+	if !errors.Is(err, core.ErrDuplicateOrder) {
+		t.Fatalf("parseAPIError() errors.Is duplicate = false")
+	}
 
 	err = parseAPIError(http.StatusBadGateway, []byte("bad gateway"))
-	if strings.Contains(err.Error(), "binance api error") {
+	if _, ok := AsAPIError(err); ok {
 		t.Fatalf("parseAPIError(non-json) unexpectedly returned APIError: %v", err)
 	}
 	if !strings.Contains(err.Error(), "http error 502") {
 		t.Fatalf("parseAPIError(non-json) = %v, want http error", err)
+	}
+}
+
+func TestParseAPIErrorClassifiesKnownFailures(t *testing.T) {
+	tests := []struct {
+		name     string
+		payload  string
+		wantErr  error
+		wantCode int
+	}{
+		{
+			name:     "insufficient balance",
+			payload:  `{"code":-2010,"msg":"Account has insufficient balance for requested action."}`,
+			wantErr:  core.ErrInsufficientBalance,
+			wantCode: -2010,
+		},
+		{
+			name:     "order not found",
+			payload:  `{"code":-2013,"msg":"Order does not exist."}`,
+			wantErr:  core.ErrOrderNotFound,
+			wantCode: -2013,
+		},
+		{
+			name:     "generic reject",
+			payload:  `{"code":-2010,"msg":"Order would immediately match and take."}`,
+			wantErr:  core.ErrOrderRejected,
+			wantCode: -2010,
+		},
+		{
+			name:     "expired",
+			payload:  `{"code":-2010,"msg":"Order was canceled or expired."}`,
+			wantErr:  core.ErrOrderExpired,
+			wantCode: -2010,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := parseAPIError(http.StatusBadRequest, []byte(tc.payload))
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("parseAPIError() errors.Is(%v) = false; err=%v", tc.wantErr, err)
+			}
+			if !IsAPIErrorCode(err, tc.wantCode) {
+				t.Fatalf("parseAPIError() code mismatch, want %d; err=%v", tc.wantCode, err)
+			}
+		})
 	}
 }
 

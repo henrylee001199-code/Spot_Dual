@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -21,6 +22,8 @@ import (
 
 var ErrManualIntervention = errors.New("manual intervention required")
 var ErrFatalLocal = errors.New("fatal local error")
+
+const liveSeenTrackerMaxEntries = 10000
 
 type LiveRunner struct {
 	Exchange   *binance.Client
@@ -37,7 +40,7 @@ type LiveRunner struct {
 }
 
 func (r *LiveRunner) Run(ctx context.Context) (runErr error) {
-	seen := newSeenTracker(200000, 24*time.Hour)
+	seen := newSeenTracker(liveSeenTrackerMaxEntries, 24*time.Hour)
 	backoff := time.Second
 	reconnectAttempts := 0
 	disconnectStartedAt := time.Time{}
@@ -150,16 +153,12 @@ func (r *LiveRunner) runOnce(ctx context.Context, reconnect bool, seen *seenTrac
 		return err
 	}
 
-	var persisted []core.Order
-	if !reconnect && r.Store != nil {
-		if orders, ok, err := r.Store.LoadOpenOrders(); err != nil {
-			return fmt.Errorf("%w: load open orders: %v", ErrFatalLocal, err)
-		} else if ok && len(orders) > 0 {
-			persisted = orders
-		}
+	persisted, skipPersistedReconcile, err := r.loadPersistedForResync(reconnect)
+	if err != nil {
+		return err
 	}
 
-	if err := r.resync(ctx, price, seen, persisted); err != nil {
+	if err := r.resync(ctx, price, seen, persisted, !skipPersistedReconcile); err != nil {
 		if errors.Is(err, strategy.ErrStopped) {
 			return nil
 		}
@@ -209,8 +208,11 @@ func (r *LiveRunner) runOnce(ctx context.Context, reconnect bool, seen *seenTrac
 			if !ok {
 				return errors.New("user stream closed")
 			}
-			key := tradeEventKey(trade)
-			if key != "" && seen != nil && seen.Seen(key, time.Now().UTC()) {
+			dup, err := r.shouldSkipTrade(trade, seen, time.Now().UTC())
+			if err != nil {
+				return fmt.Errorf("%w: trade dedup check: %v", ErrFatalLocal, err)
+			}
+			if dup {
 				continue
 			}
 			if err := r.Strategy.OnFill(ctx, trade); err != nil {
@@ -222,6 +224,9 @@ func (r *LiveRunner) runOnce(ctx context.Context, reconnect bool, seen *seenTrac
 					return nil
 				}
 				return fmt.Errorf("%w: strategy on_fill: %v", ErrFatalLocal, err)
+			}
+			if err := r.recordTradeLedger(trade); err != nil {
+				return fmt.Errorf("%w: trade ledger record: %v", ErrFatalLocal, err)
 			}
 		case err, ok := <-errs:
 			if ok && err != nil {
@@ -255,10 +260,45 @@ func (r *LiveRunner) periodicReconcile(ctx context.Context, seen *seenTracker) e
 	if err != nil {
 		return err
 	}
-	return r.resync(ctx, price, seen, nil)
+	return r.resync(ctx, price, seen, nil, true)
 }
 
-func (r *LiveRunner) resync(ctx context.Context, price decimal.Decimal, seen *seenTracker, persisted []core.Order) error {
+func (r *LiveRunner) loadPersistedForResync(reconnect bool) ([]core.Order, bool, error) {
+	if reconnect || r.Store == nil {
+		return nil, false, nil
+	}
+	state, stateOK, err := r.Store.LoadGridState()
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: load grid state: %v", ErrFatalLocal, err)
+	}
+	openOrders, openOrdersOK, err := r.Store.LoadOpenOrdersSnapshot()
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: load open orders snapshot: %v", ErrFatalLocal, err)
+	}
+	if stateOK && openOrdersOK {
+		stateID := strings.TrimSpace(state.SnapshotID)
+		ordersID := strings.TrimSpace(openOrders.SnapshotID)
+		if (stateID != "" || ordersID != "") && stateID != ordersID {
+			r.alertImportant("snapshot_mismatch_skip_reconcile_missing", map[string]string{
+				"state_snapshot_id":       stateID,
+				"open_orders_snapshot_id": ordersID,
+				"action":                  "skip_reconcile_missing",
+			})
+			log.Printf(
+				"level=WARN event=snapshot_mismatch_skip_reconcile_missing state_snapshot_id=%q open_orders_snapshot_id=%q",
+				stateID,
+				ordersID,
+			)
+			return nil, true, nil
+		}
+	}
+	if !openOrdersOK || len(openOrders.Orders) == 0 {
+		return nil, false, nil
+	}
+	return openOrders.Orders, false, nil
+}
+
+func (r *LiveRunner) resync(ctx context.Context, price decimal.Decimal, seen *seenTracker, persisted []core.Order, allowPersistedReconcile bool) error {
 	open, err := r.Exchange.OpenOrders(ctx, r.Symbol)
 	if err != nil {
 		r.alertImportant("reconcile_open_orders_failed", map[string]string{
@@ -267,22 +307,24 @@ func (r *LiveRunner) resync(ctx context.Context, price decimal.Decimal, seen *se
 		return err
 	}
 
-	if len(persisted) == 0 && r.Store != nil {
-		if orders, ok, err := r.Store.LoadOpenOrders(); err != nil {
-			return fmt.Errorf("%w: load open orders in resync: %v", ErrFatalLocal, err)
-		} else if ok && len(orders) > 0 {
-			persisted = orders
+	if allowPersistedReconcile {
+		if len(persisted) == 0 && r.Store != nil {
+			if orders, ok, err := r.Store.LoadOpenOrders(); err != nil {
+				return fmt.Errorf("%w: load open orders in resync: %v", ErrFatalLocal, err)
+			} else if ok && len(orders) > 0 {
+				persisted = orders
+			}
 		}
-	}
 
-	if len(persisted) > 0 {
-		var err error
-		open, err = r.reconcileMissing(ctx, open, persisted, seen)
-		if err != nil {
-			r.alertImportant("reconcile_missing_failed", map[string]string{
-				"err": err.Error(),
-			})
-			return err
+		if len(persisted) > 0 {
+			var err error
+			open, err = r.reconcileMissing(ctx, open, persisted, seen)
+			if err != nil {
+				r.alertImportant("reconcile_missing_failed", map[string]string{
+					"err": err.Error(),
+				})
+				return err
+			}
 		}
 	}
 
@@ -331,7 +373,7 @@ func (r *LiveRunner) reconcileMissing(ctx context.Context, open []core.Order, pe
 	for _, ord := range missing {
 		status, err := r.Exchange.QueryOrder(ctx, r.Symbol, ord.ID, ord.ClientID)
 		if err != nil {
-			if apiErr, ok := err.(binance.APIError); ok && apiErr.Code == -2013 {
+			if errors.Is(err, core.ErrOrderNotFound) || binance.IsAPIErrorCode(err, -2013) {
 				continue
 			}
 			r.alertImportant("reconcile_query_order_failed", map[string]string{
@@ -352,8 +394,11 @@ func (r *LiveRunner) reconcileMissing(ctx context.Context, open []core.Order, pe
 		case core.OrderFilled:
 			trade := tradeFromOrder(status, ord)
 			if trade.OrderID != "" {
-				key := tradeEventKey(trade)
-				if key != "" && seen != nil && seen.Seen(key, time.Now().UTC()) {
+				dup, err := r.shouldSkipTrade(trade, seen, time.Now().UTC())
+				if err != nil {
+					return open, fmt.Errorf("%w: trade dedup check: %v", ErrFatalLocal, err)
+				}
+				if dup {
 					break
 				}
 				if err := r.Strategy.OnFill(ctx, trade); err != nil {
@@ -371,14 +416,20 @@ func (r *LiveRunner) reconcileMissing(ctx context.Context, open []core.Order, pe
 					})
 					return open, fmt.Errorf("%w: strategy reconcile apply fill: %v", ErrFatalLocal, err)
 				}
+				if err := r.recordTradeLedger(trade); err != nil {
+					return open, fmt.Errorf("%w: trade ledger record: %v", ErrFatalLocal, err)
+				}
 				appliedTrade = true
 			}
 		case core.OrderCanceled, core.OrderRejected, core.OrderExpired:
 			if status.ExecutedQty.Cmp(decimal.Zero) > 0 {
 				trade := tradeFromOrder(status, ord)
 				if trade.OrderID != "" {
-					key := tradeEventKey(trade)
-					if key != "" && seen != nil && seen.Seen(key, time.Now().UTC()) {
+					dup, err := r.shouldSkipTrade(trade, seen, time.Now().UTC())
+					if err != nil {
+						return open, fmt.Errorf("%w: trade dedup check: %v", ErrFatalLocal, err)
+					}
+					if dup {
 						break
 					}
 					if err := r.Strategy.OnFill(ctx, trade); err != nil {
@@ -395,6 +446,9 @@ func (r *LiveRunner) reconcileMissing(ctx context.Context, open []core.Order, pe
 							"err":             err.Error(),
 						})
 						return open, fmt.Errorf("%w: strategy reconcile apply partial close: %v", ErrFatalLocal, err)
+					}
+					if err := r.recordTradeLedger(trade); err != nil {
+						return open, fmt.Errorf("%w: trade ledger record: %v", ErrFatalLocal, err)
 					}
 					appliedTrade = true
 				}
@@ -625,4 +679,41 @@ func tradeEventKey(trade core.Trade) string {
 		key += "|qty:" + trade.Qty.String()
 	}
 	return key
+}
+
+func tradeLedgerKey(trade core.Trade) string {
+	if trade.OrderID == "" || trade.TradeID == "" {
+		return ""
+	}
+	return "order:" + trade.OrderID + "|trade:" + trade.TradeID
+}
+
+func (r *LiveRunner) shouldSkipTrade(trade core.Trade, seen *seenTracker, now time.Time) (bool, error) {
+	key := tradeEventKey(trade)
+	if key != "" && seen != nil && seen.Seen(key, now) {
+		return true, nil
+	}
+	if r.Store == nil {
+		return false, nil
+	}
+	ledgerKey := tradeLedgerKey(trade)
+	if ledgerKey == "" {
+		return false, nil
+	}
+	seenBefore, err := r.Store.HasTradeLedgerKey(ledgerKey)
+	if err != nil {
+		return false, err
+	}
+	return seenBefore, nil
+}
+
+func (r *LiveRunner) recordTradeLedger(trade core.Trade) error {
+	if r.Store == nil {
+		return nil
+	}
+	ledgerKey := tradeLedgerKey(trade)
+	if ledgerKey == "" {
+		return nil
+	}
+	return r.Store.RecordTradeLedgerKey(ledgerKey, trade.Time)
 }

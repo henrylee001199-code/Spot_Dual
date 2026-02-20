@@ -121,13 +121,13 @@ func (s *SimExchange) PlaceOrder(ctx context.Context, order core.Order) (core.Or
 	case core.Buy:
 		reserve := s.reservedBuyQuote(order.Price, order.Qty, s.makerFee)
 		if s.balanceFree.Quote.Cmp(reserve) < 0 {
-			return core.Order{}, errors.New("insufficient quote balance")
+			return core.Order{}, fmt.Errorf("%w: quote balance", core.ErrInsufficientBalance)
 		}
 		s.balanceFree.Quote = s.balanceFree.Quote.Sub(reserve)
 		s.quoteLocked = s.quoteLocked.Add(reserve)
 	case core.Sell:
 		if s.balanceFree.Base.Cmp(order.Qty) < 0 {
-			return core.Order{}, errors.New("insufficient base balance")
+			return core.Order{}, fmt.Errorf("%w: base balance", core.ErrInsufficientBalance)
 		}
 		s.balanceFree.Base = s.balanceFree.Base.Sub(order.Qty)
 		s.baseLocked = s.baseLocked.Add(order.Qty)
@@ -222,7 +222,7 @@ func (s *SimExchange) applyMarketFill(ord *core.Order) error {
 	case core.Buy:
 		required := cost.Add(fee)
 		if s.balanceFree.Quote.Cmp(required) < 0 {
-			return errors.New("insufficient quote balance")
+			return fmt.Errorf("%w: quote balance", core.ErrInsufficientBalance)
 		}
 		s.balanceFree.Quote = s.balanceFree.Quote.Sub(required)
 		s.balanceFree.Base = s.balanceFree.Base.Add(ord.Qty)
@@ -231,7 +231,7 @@ func (s *SimExchange) applyMarketFill(ord *core.Order) error {
 		s.marketBuyQ = s.marketBuyQ.Add(ord.Qty)
 	case core.Sell:
 		if s.balanceFree.Base.Cmp(ord.Qty) < 0 {
-			return errors.New("insufficient base balance")
+			return fmt.Errorf("%w: base balance", core.ErrInsufficientBalance)
 		}
 		s.balanceFree.Base = s.balanceFree.Base.Sub(ord.Qty)
 		s.balanceFree.Quote = s.balanceFree.Quote.Add(cost.Sub(fee))

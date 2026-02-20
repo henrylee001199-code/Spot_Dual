@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -177,19 +176,23 @@ func (c *Client) placeOrderREST(ctx context.Context, order core.Order) (core.Ord
 
 	body, err := c.doRequest(ctx, http.MethodPost, "/api/v3/order", params, AuthSigned)
 	if err != nil {
-		if apiErr, ok := err.(APIError); ok {
-			if isRejectOrExpireStatus(apiErr.Msg) {
-				c.alertImportant("order_rejected_or_expired", map[string]string{
-					"symbol":     order.Symbol,
-					"side":       string(order.Side),
-					"type":       string(order.Type),
-					"client_id":  order.ClientID,
-					"error_code": strconv.Itoa(apiErr.Code),
-					"error_msg":  apiErr.Msg,
-				})
+		if errors.Is(err, core.ErrOrderRejected) || errors.Is(err, core.ErrOrderExpired) {
+			errorCode := "unknown"
+			errorMsg := err.Error()
+			if apiErr, ok := AsAPIError(err); ok {
+				errorCode = strconv.Itoa(apiErr.Code)
+				errorMsg = apiErr.Msg
 			}
+			c.alertImportant("order_rejected_or_expired", map[string]string{
+				"symbol":     order.Symbol,
+				"side":       string(order.Side),
+				"type":       string(order.Type),
+				"client_id":  order.ClientID,
+				"error_code": errorCode,
+				"error_msg":  errorMsg,
+			})
 		}
-		if apiErr, ok := err.(APIError); ok && apiErr.Code == -2010 && strings.Contains(strings.ToLower(apiErr.Msg), "duplicate") {
+		if errors.Is(err, core.ErrDuplicateOrder) {
 			if order.ClientID != "" {
 				if existing, err := c.getOrderByClientID(ctx, order.Symbol, order.ClientID); err == nil {
 					return existing, nil
@@ -205,11 +208,6 @@ func (c *Client) placeOrderREST(ctx context.Context, order core.Order) (core.Ord
 	order.ID = strconv.FormatInt(resp.OrderID, 10)
 	order.Status = core.OrderNew
 	return order, nil
-}
-
-func isRejectOrExpireStatus(v string) bool {
-	s := strings.ToUpper(v)
-	return strings.Contains(s, "REJECT") || strings.Contains(s, "EXPIRE")
 }
 
 func (c *Client) ensureOrderConn(ctx context.Context) (*websocket.Conn, error) {
