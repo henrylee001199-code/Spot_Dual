@@ -7,7 +7,7 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"grid-trading/internal/core"
+	"spot-dual/internal/core"
 )
 
 type Strategy interface {

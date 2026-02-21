@@ -13,7 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shopspring/decimal"
 
-	"grid-trading/internal/core"
+	"spot-dual/internal/core"
 )
 
 type wsOrderResult struct {

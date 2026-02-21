@@ -15,7 +15,7 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"grid-trading/internal/core"
+	"spot-dual/internal/core"
 )
 
 type GridState struct {
@@ -385,7 +385,7 @@ func writeJSONLinesAtomic(path string, entries []TradeLedgerEntry) error {
 }
 
 func fsyncDirBestEffort(dir, path string) error {
-	// Best-effort directory fsync to improve rename durability across crashes.
+	// 尽力对目录执行 fsync，提升崩溃场景下 rename 的持久性。
 	d, err := os.Open(dir)
 	if err != nil {
 		log.Printf(

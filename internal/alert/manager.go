@@ -110,7 +110,7 @@ func (m *Manager) Important(event string, fields map[string]string) {
 		droppedTotal := atomic.AddUint64(&m.droppedTotal, 1)
 		droppedInWindow := atomic.AddUint64(&m.droppedSinceReported, 1)
 		m.mu.RUnlock()
-		// Report first dropped alert in a window immediately; periodic summary emits total drops in window.
+		// 在一个统计窗口内首条丢弃立即上报；周期汇总会输出窗口总丢弃量。
 		if droppedInWindow == 1 {
 			log.Printf(
 				"level=WARN event=alert_queue_dropped target_event=%q reason=%q dropped_total=%d queue_len=%d queue_cap=%d",

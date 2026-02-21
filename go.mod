@@ -1,4 +1,4 @@
-module grid-trading
+module spot-dual
 
 go 1.21
 

@@ -12,10 +12,10 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"grid-trading/internal/config"
-	"grid-trading/internal/core"
-	"grid-trading/internal/exchange/binance"
-	"grid-trading/internal/strategy"
+	"spot-dual/internal/config"
+	"spot-dual/internal/core"
+	"spot-dual/internal/exchange/binance"
+	"spot-dual/internal/strategy"
 )
 
 type checkStatus string
@@ -241,9 +241,9 @@ func main() {
 					status = string(queryAfter.Order.Status)
 				}
 			case core.OrderFilled:
-				// Unexpected for a far-below-market order but acceptable for lifecycle check.
+				// 对于远低于市价的订单，出现 FILLED 虽然不常见，但在生命周期检查中可接受。
 			default:
-				// keep status for report
+				// 保留当前状态用于报告输出
 			}
 
 			return fmt.Sprintf("id=%s clientId=%s side=%s qty=%s price=%s status=%s foundInOpen=%t", placedID, placedCID, placedSide, qty.String(), price.String(), status, foundInOpen), nil
@@ -324,7 +324,7 @@ func main() {
 		})
 	}
 
-	// cleanup: if lifecycle order still exists, best-effort cancel
+	// 清理：若生命周期检查订单仍存在，尽力撤单
 	if placedID != "" {
 		_ = client.CancelOrder(context.Background(), cfg.Symbol, placedID)
 	}

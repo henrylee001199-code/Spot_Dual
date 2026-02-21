@@ -9,9 +9,9 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"grid-trading/internal/backtest"
-	"grid-trading/internal/core"
-	"grid-trading/internal/strategy"
+	"spot-dual/internal/backtest"
+	"spot-dual/internal/core"
+	"spot-dual/internal/strategy"
 )
 
 type noopStrategy struct{}

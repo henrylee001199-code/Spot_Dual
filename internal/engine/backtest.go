@@ -7,9 +7,9 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"grid-trading/internal/backtest"
-	"grid-trading/internal/core"
-	"grid-trading/internal/strategy"
+	"spot-dual/internal/backtest"
+	"spot-dual/internal/core"
+	"spot-dual/internal/strategy"
 )
 
 type BacktestRunner struct {
@@ -159,9 +159,9 @@ func (r *BacktestRunner) Run(ctx context.Context) (BacktestResult, error) {
 		result.EquityReturnPct = result.ProfitQuote.Div(result.StartEquityQuote).Mul(decimal.NewFromInt(100))
 	}
 	if maxLockedCapital.Cmp(decimal.Zero) > 0 {
-		// Capital-efficiency return: profit over peak locked capital.
+		// 资金效率收益率：利润 / 峰值锁定资金。
 		result.TotalReturnPct = result.ProfitQuote.Div(maxLockedCapital).Mul(decimal.NewFromInt(100))
-		// Capital-denominated drawdown: max equity drop over peak locked capital.
+		// 资金口径回撤：最大权益回撤 / 峰值锁定资金。
 		result.CapitalDrawdownPct = result.MaxDrawdownQuote.Div(maxLockedCapital).Mul(decimal.NewFromInt(100))
 	}
 	prevClose := result.StartEquityQuote

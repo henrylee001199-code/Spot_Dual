@@ -9,8 +9,8 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"grid-trading/internal/core"
-	"grid-trading/internal/store"
+	"spot-dual/internal/core"
+	"spot-dual/internal/store"
 )
 
 type fakeExecutor struct {

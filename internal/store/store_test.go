@@ -10,7 +10,7 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"grid-trading/internal/core"
+	"spot-dual/internal/core"
 )
 
 func TestStoreRuntimeStatusRoundTrip(t *testing.T) {

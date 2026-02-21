@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"grid-trading/internal/alert"
-	"grid-trading/internal/core"
+	"spot-dual/internal/alert"
+	"spot-dual/internal/core"
 )
 
 var ErrCircuitOpen = errors.New("circuit breaker open")
@@ -205,7 +205,7 @@ func (b *Breaker) record(name string, c *circuit, err error) error {
 				c.halfOpenSuccess = 0
 			}
 		case circuitOpen:
-			// non-reconnect paths cannot probe while open; keep state untouched.
+			// 非重连路径在 open 状态下不能探测；保持状态不变。
 		case circuitClosed:
 			if c.failures > 0 {
 				recovered = true

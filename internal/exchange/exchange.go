@@ -3,7 +3,7 @@ package exchange
 import (
 	"context"
 
-	"grid-trading/internal/core"
+	"spot-dual/internal/core"
 )
 
 type Exchange interface {

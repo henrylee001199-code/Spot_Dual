@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	"grid-trading/internal/core"
+	"spot-dual/internal/core"
 )
 
 const (

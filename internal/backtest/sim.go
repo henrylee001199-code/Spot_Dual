@@ -8,7 +8,7 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"grid-trading/internal/core"
+	"spot-dual/internal/core"
 )
 
 type SimExchange struct {

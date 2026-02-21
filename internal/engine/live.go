@@ -12,12 +12,12 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"grid-trading/internal/alert"
-	"grid-trading/internal/core"
-	"grid-trading/internal/exchange/binance"
-	"grid-trading/internal/safety"
-	"grid-trading/internal/store"
-	"grid-trading/internal/strategy"
+	"spot-dual/internal/alert"
+	"spot-dual/internal/core"
+	"spot-dual/internal/exchange/binance"
+	"spot-dual/internal/safety"
+	"spot-dual/internal/store"
+	"spot-dual/internal/strategy"
 )
 
 var ErrManualIntervention = errors.New("manual intervention required")

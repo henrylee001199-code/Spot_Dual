@@ -19,9 +19,9 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"grid-trading/internal/alert"
-	"grid-trading/internal/config"
-	"grid-trading/internal/core"
+	"spot-dual/internal/alert"
+	"spot-dual/internal/config"
+	"spot-dual/internal/core"
 )
 
 type AuthType int

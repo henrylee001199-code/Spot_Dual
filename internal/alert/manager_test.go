@@ -138,7 +138,7 @@ func TestManagerTracksDroppedCountAndPendingWindow(t *testing.T) {
 		t.Fatalf("notifier did not enter blocked state")
 	}
 
-	// Fill queue while notifier goroutine is blocked, then force drops.
+	// 在 notifier 协程阻塞时先填满队列，再触发丢弃。
 	m.Important("queue_fill", nil)
 	for i := 0; i < 10; i++ {
 		m.Important("spam", map[string]string{"i": "x"})

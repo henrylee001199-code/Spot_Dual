@@ -5,9 +5,9 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"grid-trading/internal/config"
-	"grid-trading/internal/core"
-	"grid-trading/internal/strategy"
+	"spot-dual/internal/config"
+	"spot-dual/internal/core"
+	"spot-dual/internal/strategy"
 )
 
 func ratioStepPtr(v string) *config.Decimal {

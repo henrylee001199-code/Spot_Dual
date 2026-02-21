@@ -16,11 +16,11 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shopspring/decimal"
 
-	"grid-trading/internal/core"
-	"grid-trading/internal/exchange/binance"
-	"grid-trading/internal/safety"
-	"grid-trading/internal/store"
-	"grid-trading/internal/strategy"
+	"spot-dual/internal/core"
+	"spot-dual/internal/exchange/binance"
+	"spot-dual/internal/safety"
+	"spot-dual/internal/store"
+	"spot-dual/internal/strategy"
 )
 
 type liveStrategySpy struct {
@@ -128,7 +128,7 @@ func TestLiveRunOnceReconnectAndResync(t *testing.T) {
 		}
 
 		if idx == 1 {
-			// First stream closes immediately to simulate disconnect.
+			// 第一个流立即关闭，用于模拟断连。
 			return
 		}
 
@@ -1161,7 +1161,7 @@ func TestLiveRunnerLoadPersistedForResyncSkipsOnSnapshotMismatch(t *testing.T) {
 	if err := st.SaveOpenOrders(orders); err != nil {
 		t.Fatalf("SaveOpenOrders() error = %v", err)
 	}
-	// Overwrite only grid state to simulate torn write (new state, old open_orders).
+	// 仅覆盖 grid state，用于模拟撕裂写入（state 新、open_orders 旧）。
 	if err := st.SaveGridState(store.GridState{
 		Symbol:     "BTCUSDT",
 		SnapshotID: "snap-2",

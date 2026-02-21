@@ -9,9 +9,9 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"grid-trading/internal/alert"
-	"grid-trading/internal/core"
-	"grid-trading/internal/store"
+	"spot-dual/internal/alert"
+	"spot-dual/internal/core"
+	"spot-dual/internal/store"
 )
 
 const defaultRatioStep = "0.002"
@@ -74,6 +74,7 @@ func NewSpotDual(symbol string, stopPrice, ratio decimal.Decimal, levels, shift 
 	}
 }
 
+// LoadState 用于启动恢复：仅当 symbol 匹配时，将持久化快照回填到内存态。
 func (s *SpotDual) LoadState(state store.GridState) {
 	if state.Symbol != "" && state.Symbol != s.Symbol {
 		return
@@ -135,7 +136,13 @@ func (s *SpotDual) SetRatioQtyMultiple(v decimal.Decimal) {
 	}
 }
 
+// Init 主流程：
+// 1) 做停止条件与参数校验
+// 2) 初始化锚点与网格窗口
+// 3) 按卖单窗口补足基础仓位
+// 4) 挂出初始双边网格并持久化快照
 func (s *SpotDual) Init(ctx context.Context, price decimal.Decimal) error {
+	// 运行态前置检查：已经停止/已经初始化/触发止损
 	if s.stopped {
 		return ErrStopped
 	}
@@ -160,6 +167,7 @@ func (s *SpotDual) Init(ctx context.Context, price decimal.Decimal) error {
 	if s.SellRatio.Cmp(decimal.NewFromInt(1)) <= 0 {
 		return errors.New("sell_ratio must be > 1")
 	}
+	// 首次初始化时确定锚点与网格窗口
 	if s.anchor.Cmp(decimal.Zero) <= 0 {
 		s.anchor = price
 	}
@@ -173,6 +181,7 @@ func (s *SpotDual) Init(ctx context.Context, price decimal.Decimal) error {
 		return errors.New("shift_levels must be >= 1")
 	}
 
+	// 启动阶段先补齐顶部卖单所需的基础仓，避免上方卖单因仓位不足失败
 	orderQty := s.orderQty()
 	totalBase := orderQty.Mul(decimal.NewFromInt(int64(s.maxLevel)))
 	if totalBase.Cmp(decimal.Zero) > 0 {
@@ -198,6 +207,7 @@ func (s *SpotDual) Init(ctx context.Context, price decimal.Decimal) error {
 		}
 	}
 
+	// 挂初始卖单（上半区）和买单（下半区）
 	for i := 1; i <= s.maxLevel; i++ {
 		if err := s.placeLimit(ctx, core.Sell, i); err != nil {
 			s.alertImportant("bootstrap_failed", map[string]string{
@@ -221,6 +231,7 @@ func (s *SpotDual) Init(ctx context.Context, price decimal.Decimal) error {
 		}
 	}
 
+	// 初始化完成后立即落盘，保证重启可恢复
 	s.initialized = true
 	if err := s.persistSnapshot(); err != nil {
 		s.alertImportant("bootstrap_failed", map[string]string{
@@ -247,6 +258,11 @@ func (s *SpotDual) baseBuyNeed(ctx context.Context, target decimal.Decimal) (dec
 	return need, nil
 }
 
+// OnFill 主流程：
+// 1) 处理忽略成交与部分成交
+// 2) 记录成交并更新 openOrders
+// 3) 按成交方向补挂对侧单
+// 4) 在边界触发移窗（上移/下移）并持久化
 func (s *SpotDual) OnFill(ctx context.Context, trade core.Trade) error {
 	if s.stopped {
 		return ErrStopped
@@ -254,6 +270,7 @@ func (s *SpotDual) OnFill(ctx context.Context, trade core.Trade) error {
 	if trade.Status == "" {
 		trade.Status = core.OrderFilled
 	}
+	// ignoreFills 主要用于内部市价补仓单，避免把其成交当作网格迁移信号
 	if _, ok := s.ignoreFills[trade.OrderID]; ok {
 		if s.store != nil {
 			if err := s.store.AppendTrade(trade); err != nil {
@@ -276,6 +293,7 @@ func (s *SpotDual) OnFill(ctx context.Context, trade core.Trade) error {
 
 	ord, ok := s.openOrders[trade.OrderID]
 	if ok {
+		// 对部分成交仅扣减剩余数量，不触发网格迁移
 		if trade.Qty.Cmp(decimal.Zero) > 0 && trade.Qty.Cmp(ord.Qty) < 0 && trade.Status == core.OrderPartiallyFilled {
 			ord.Qty = ord.Qty.Sub(trade.Qty)
 			s.openOrders[trade.OrderID] = ord
@@ -320,6 +338,7 @@ func (s *SpotDual) OnFill(ctx context.Context, trade core.Trade) error {
 		if trade.Status != core.OrderFilled {
 			return s.persistSnapshot()
 		}
+		// 对账补单等场景可能拿不到本地订单，用价格反推网格索引
 		var idxOk bool
 		idx, idxOk = s.indexForPrice(trade.Price)
 		if !idxOk {
@@ -329,6 +348,7 @@ func (s *SpotDual) OnFill(ctx context.Context, trade core.Trade) error {
 
 	switch side {
 	case core.Sell:
+		// 卖单成交后，在下一档补挂买单；若打到顶部则触发上移
 		if err := s.placeLimit(ctx, core.Buy, idx-1); err != nil {
 			_ = s.persistSnapshot()
 			return err
@@ -340,6 +360,7 @@ func (s *SpotDual) OnFill(ctx context.Context, trade core.Trade) error {
 			}
 		}
 	case core.Buy:
+		// 买单成交后，在上一档补挂卖单；若打到底部则触发下移扩展
 		if err := s.placeLimit(ctx, core.Sell, idx+1); err != nil {
 			_ = s.persistSnapshot()
 			return err
@@ -355,6 +376,7 @@ func (s *SpotDual) OnFill(ctx context.Context, trade core.Trade) error {
 	return s.persistSnapshot()
 }
 
+// OnTick 仅做轻量运行维护：止损检查 + 懒加载窗口修正。
 func (s *SpotDual) OnTick(ctx context.Context, price decimal.Decimal, _ time.Time) error {
 	if s.stopped {
 		return ErrStopped
@@ -380,6 +402,11 @@ func (s *SpotDual) OnTick(ctx context.Context, price decimal.Decimal, _ time.Tim
 	return nil
 }
 
+// Reconcile 主流程：
+// 1) 以交易所开单重建本地 openOrders 视图
+// 2) 清理重复单/冲突单
+// 3) 补齐缺失网格（必要时先补基础仓）
+// 4) 校验完整性并持久化
 func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrders []core.Order) error {
 	if s.stopped {
 		return s.reconcileStopped(ctx, openOrders)
@@ -497,6 +524,7 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 		}
 	}
 	if len(missingSellLevels) > 0 {
+		// 卖单缺口先评估基础仓是否足够，不足则先补仓再补卖单
 		buyQty, err := s.shiftBuyNeed(ctx, len(missingSellLevels))
 		if err != nil {
 			s.alertImportant("reconcile_base_buy_need_failed", map[string]string{
@@ -763,6 +791,7 @@ func (s *SpotDual) extendDown(ctx context.Context) error {
 	if s.Levels <= 0 {
 		return nil
 	}
+	// 下移：窗口向下扩展一个 levels，并按倍率补挂新增买单
 	oldMin := s.minLevel
 	s.minLevel = s.minLevel - s.Levels
 	qtyMultiple := s.downShiftQtyMultiple()
@@ -779,11 +808,13 @@ func (s *SpotDual) shiftUp(ctx context.Context, filledLevel int, triggerPrice de
 	if shift < 1 {
 		return nil
 	}
+	// 上移仅在“顶部卖单成交”时触发，避免中间成交误移窗
 	oldMin := s.minLevel
 	oldMax := s.maxLevel
 	if filledLevel != oldMax {
 		return nil
 	}
+	// 上移步骤：恢复防守参数 -> 删除底部买单 -> 维持配对买单 -> 必要时补仓 -> 扩展顶部卖单
 	s.restoreBuyRatioOnShiftUp(triggerPrice, at)
 	newMin := oldMin + shift
 	newMax := oldMax + shift
@@ -824,6 +855,7 @@ func (s *SpotDual) shouldStop(price decimal.Decimal) bool {
 
 func (s *SpotDual) stopNow(ctx context.Context) error {
 	justStopped := !s.stopped
+	// 止损后只撤买单，卖单保留为仓位处置的人工干预依据
 	s.cancelAllOpenBuyOrders(ctx)
 	s.stopped = true
 	s.initialized = false
@@ -1148,6 +1180,7 @@ func isInsufficientBalanceError(err error) bool {
 	return errors.Is(err, core.ErrInsufficientBalance)
 }
 
+// persistSnapshot 按“状态 + 开单快照”成对落盘，供重启恢复与对账使用。
 func (s *SpotDual) persistSnapshot() error {
 	if s.store == nil {
 		return nil

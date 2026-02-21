@@ -5,7 +5,7 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"grid-trading/internal/core"
+	"spot-dual/internal/core"
 )
 
 type apiError struct {
@@ -118,7 +118,7 @@ func parseSymbolInfo(src symbolInfoResponse) symbolInfo {
 		case "MIN_NOTIONAL", "NOTIONAL":
 			if f.MinNotional != "" {
 				if v, err := decimal.NewFromString(f.MinNotional); err == nil {
-					// If both MIN_NOTIONAL and NOTIONAL are present, keep the stricter minimum.
+					// 若同时存在 MIN_NOTIONAL 与 NOTIONAL，取更严格的最小值。
 					if v.Cmp(info.rules.MinNotional) > 0 {
 						info.rules.MinNotional = v
 					}

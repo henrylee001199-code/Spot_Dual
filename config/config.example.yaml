@@ -1,31 +1,31 @@
-mode: testnet # backtest | testnet | live
+mode: testnet # 运行模式：backtest | testnet | live
 symbol: BTCUSDT
-instance_id: bot1 # used in state path and clientOrderId prefix
+instance_id: bot1 # 用于状态路径与 clientOrderId 前缀
 
 grid:
-  stop_price: "0" # stop strategy when market price > stop_price (0 means disabled)
-  ratio: "1.012" # buy-side geometric spacing ratio, must be > 1
-  ratio_step: "0.002" # buy-ratio defense increment on each down-shift trigger (0 disables increment, omit to use default 0.002)
-  ratio_qty_multiple: "1.2" # during down-shift extension, new buy order qty = qty * ratio_qty_multiple
-  sell_ratio: "1.012" # sell-side geometric spacing ratio, must be > 1
-  levels: 20 # active buy levels below anchor
-  shift_levels: 10 # active sell levels above anchor; also used as shift window size
-  mode: geometric # only geometric is supported
-  qty: "0.001" # order qty before rule rounding
-  min_qty_multiple: 1 # final qty floor = min_qty * min_qty_multiple
+  stop_price: "0" # 市场价 > stop_price 时停止策略（0 表示禁用）
+  ratio: "1.012" # 买侧几何间距比率，必须 > 1
+  ratio_step: "0.002" # 每次触发下移时买侧 ratio 的防守增量（0 表示禁用；省略则默认 0.002）
+  ratio_qty_multiple: "1.2" # 下移扩展时，新买单数量 = qty * ratio_qty_multiple
+  sell_ratio: "1.012" # 卖侧几何间距比率，必须 > 1
+  levels: 20 # 锚点下方激活的买单层数
+  shift_levels: 10 # 锚点上方激活的卖单层数；也用作移窗步长
+  mode: geometric # 仅支持 geometric
+  qty: "0.001" # 规则归一化前的下单数量
+  min_qty_multiple: 1 # 最终数量下限 = min_qty * min_qty_multiple
 
 state:
-  dir: "state" # state/{mode}/{symbol}/{instance_id}, includes state/open_orders/runtime_status
-  lock_takeover: true # try taking over stale .instance.lock when previous process crashed
-  lock_stale_sec: 600 # stale threshold for lock file age fallback checks
+  dir: "state" # state/{mode}/{symbol}/{instance_id}，包含 state/open_orders/runtime_status
+  lock_takeover: true # 上一进程异常退出时，尝试接管陈旧的 .instance.lock
+  lock_stale_sec: 600 # 锁文件老化阈值（用于回退判断）
 
 circuit_breaker:
   enabled: true
   max_place_failures: 5
   max_cancel_failures: 5
   max_reconnect_failures: 10
-  reconnect_cooldown_sec: 30 # cooldown before reconnect probe in half-open state
-  reconnect_probe_passes: 1 # successful reconnect probes required to close breaker
+  reconnect_cooldown_sec: 30 # half-open 状态下发起重连探测前的冷却时间
+  reconnect_probe_passes: 1 # 断路器关闭前要求的重连探测成功次数
 
 observability:
   telegram:
@@ -35,12 +35,12 @@ observability:
     api_base_url: "https://api.telegram.org"
     timeout_sec: 10
   runtime:
-    heartbeat_sec: 60 # 0 disables runtime status heartbeat file updates
-    reconcile_interval_sec: 60 # 0 disables periodic reconcile (not recommended for live)
-    alert_drop_report_sec: 60 # 0 disables periodic alert_queue_dropped summary logs
+    heartbeat_sec: 60 # 设为 0 可禁用 runtime 状态心跳文件更新
+    reconcile_interval_sec: 60 # 设为 0 可禁用周期性 reconcile（不建议 live）
+    alert_drop_report_sec: 60 # 设为 0 可禁用 alert_queue_dropped 周期汇总日志
 
 backtest:
-  # supports single jsonl file or a directory with date-partitioned files like 2026-02-01.jsonl
+  # 支持单个 jsonl 文件，或按天分片目录（例如 2026-02-01.jsonl）
   data_path: /path/to/data_or_dir
   initial_base: "0"
   initial_quote: "1000"
@@ -56,13 +56,13 @@ backtest:
 exchange:
   api_key: "YOUR_TESTNET_API_KEY"
   api_secret: "YOUR_TESTNET_API_SECRET"
-  # Current grid-trading repo uses SPOT endpoints.
-  # If you run a futures branch, switch these to fapi endpoints.
+  # 当前仓库使用现货端点。
+  # 若你运行的是合约分支，请切换到 fapi 端点。
   rest_base_url: "https://testnet.binance.vision"
   ws_base_url: "wss://ws-api.testnet.binance.vision/ws-api/v3"
-  user_stream_auth: signature # signature | session
-  ws_ed25519_private_key_path: "" # required only when user_stream_auth=session
+  user_stream_auth: signature # 用户流鉴权方式：signature | session
+  ws_ed25519_private_key_path: "" # 仅在 user_stream_auth=session 时必填
   recv_window_ms: 5000
   http_timeout_sec: 15
-  user_stream_keepalive_sec: 30 # user-stream ws ping/read heartbeat interval
-  order_ws_keepalive_sec: 30 # ws-api ping interval
+  user_stream_keepalive_sec: 30 # user-stream 的 ws ping/read 心跳间隔
+  order_ws_keepalive_sec: 30 # ws-api ping 间隔

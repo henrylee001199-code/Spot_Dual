@@ -12,15 +12,15 @@ import (
 	"syscall"
 	"time"
 
-	"grid-trading/internal/alert"
-	"grid-trading/internal/backtest"
-	"grid-trading/internal/config"
-	"grid-trading/internal/core"
-	"grid-trading/internal/engine"
-	"grid-trading/internal/exchange/binance"
-	"grid-trading/internal/safety"
-	"grid-trading/internal/store"
-	"grid-trading/internal/strategy"
+	"spot-dual/internal/alert"
+	"spot-dual/internal/backtest"
+	"spot-dual/internal/config"
+	"spot-dual/internal/core"
+	"spot-dual/internal/engine"
+	"spot-dual/internal/exchange/binance"
+	"spot-dual/internal/safety"
+	"spot-dual/internal/store"
+	"spot-dual/internal/strategy"
 )
 
 func main() {
