@@ -90,12 +90,14 @@ func TestLiveRunOnceReconnectAndResync(t *testing.T) {
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v3/ticker/price":
+		case "/fapi/v1/listenKey":
+			_ = writeJSON(w, http.StatusOK, map[string]any{"listenKey": "lk-test"})
+		case "/fapi/v1/ticker/price":
 			_ = writeJSON(w, http.StatusOK, map[string]string{
 				"symbol": "BTCUSDT",
 				"price":  "100",
 			})
-		case "/api/v3/openOrders":
+		case "/fapi/v1/openOrders":
 			_ = writeJSON(w, http.StatusOK, []any{})
 		default:
 			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
@@ -117,22 +119,13 @@ func TestLiveRunOnceReconnectAndResync(t *testing.T) {
 		defer conn.Close()
 
 		idx := atomic.AddInt32(&wsConnCount, 1)
-		reqID, err := readWSReqID(conn)
-		if err != nil {
-			recordAsyncErr(asyncErrs, err)
-			return
-		}
-		if err := writeWSResponse(conn, reqID); err != nil {
-			recordAsyncErr(asyncErrs, err)
-			return
-		}
 
 		if idx == 1 {
 			// First stream closes immediately to simulate disconnect.
 			return
 		}
 
-		if err := writeExecutionReport(conn, executionReportPayload{
+		if err := writeOrderTradeUpdate(conn, orderTradeUpdatePayload{
 			OrderID:   12001,
 			TradeID:   22001,
 			Side:      "BUY",
@@ -206,12 +199,14 @@ func TestLiveRunnerProcessesPartialAndFinalTrades(t *testing.T) {
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v3/ticker/price":
+		case "/fapi/v1/listenKey":
+			_ = writeJSON(w, http.StatusOK, map[string]any{"listenKey": "lk-test"})
+		case "/fapi/v1/ticker/price":
 			_ = writeJSON(w, http.StatusOK, map[string]string{
 				"symbol": "BTCUSDT",
 				"price":  "100",
 			})
-		case "/api/v3/openOrders":
+		case "/fapi/v1/openOrders":
 			_ = writeJSON(w, http.StatusOK, []any{})
 		default:
 			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
@@ -231,17 +226,7 @@ func TestLiveRunnerProcessesPartialAndFinalTrades(t *testing.T) {
 		}
 		defer conn.Close()
 
-		reqID, err := readWSReqID(conn)
-		if err != nil {
-			recordAsyncErr(asyncErrs, err)
-			return
-		}
-		if err := writeWSResponse(conn, reqID); err != nil {
-			recordAsyncErr(asyncErrs, err)
-			return
-		}
-
-		if err := writeExecutionReport(conn, executionReportPayload{
+		if err := writeOrderTradeUpdate(conn, orderTradeUpdatePayload{
 			OrderID:   32001,
 			TradeID:   42001,
 			Side:      "SELL",
@@ -254,7 +239,7 @@ func TestLiveRunnerProcessesPartialAndFinalTrades(t *testing.T) {
 			recordAsyncErr(asyncErrs, err)
 			return
 		}
-		if err := writeExecutionReport(conn, executionReportPayload{
+		if err := writeOrderTradeUpdate(conn, orderTradeUpdatePayload{
 			OrderID:   32001,
 			TradeID:   42002,
 			Side:      "SELL",
@@ -318,12 +303,14 @@ func TestLiveRunOnceExitsCleanlyWhenInitialResyncStopsStrategy(t *testing.T) {
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v3/ticker/price":
+		case "/fapi/v1/listenKey":
+			_ = writeJSON(w, http.StatusOK, map[string]any{"listenKey": "lk-test"})
+		case "/fapi/v1/ticker/price":
 			_ = writeJSON(w, http.StatusOK, map[string]string{
 				"symbol": "BTCUSDT",
 				"price":  "100",
 			})
-		case "/api/v3/openOrders":
+		case "/fapi/v1/openOrders":
 			_ = writeJSON(w, http.StatusOK, []any{})
 		default:
 			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
@@ -393,7 +380,9 @@ func TestLiveReconcileMissingAppliesFilledOnlyOnce(t *testing.T) {
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v3/order":
+		case "/fapi/v1/listenKey":
+			_ = writeJSON(w, http.StatusOK, map[string]any{"listenKey": "lk-test"})
+		case "/fapi/v1/order":
 			_ = writeJSON(w, http.StatusOK, map[string]any{
 				"symbol":              "BTCUSDT",
 				"orderId":             50001,
@@ -408,7 +397,7 @@ func TestLiveReconcileMissingAppliesFilledOnlyOnce(t *testing.T) {
 				"time":                time.Now().Add(-time.Second).UnixMilli(),
 				"updateTime":          time.Now().UnixMilli(),
 			})
-		case "/api/v3/openOrders":
+		case "/fapi/v1/openOrders":
 			_ = writeJSON(w, http.StatusOK, []any{})
 		default:
 			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
@@ -478,7 +467,9 @@ func TestLiveReconcileMissingAutoHandlesClosedPartialFill(t *testing.T) {
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v3/order":
+		case "/fapi/v1/listenKey":
+			_ = writeJSON(w, http.StatusOK, map[string]any{"listenKey": "lk-test"})
+		case "/fapi/v1/order":
 			_ = writeJSON(w, http.StatusOK, map[string]any{
 				"symbol":              "BTCUSDT",
 				"orderId":             50002,
@@ -493,7 +484,7 @@ func TestLiveReconcileMissingAutoHandlesClosedPartialFill(t *testing.T) {
 				"time":                time.Now().Add(-time.Second).UnixMilli(),
 				"updateTime":          time.Now().UnixMilli(),
 			})
-		case "/api/v3/openOrders":
+		case "/fapi/v1/openOrders":
 			_ = writeJSON(w, http.StatusOK, []any{})
 		default:
 			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
@@ -569,12 +560,14 @@ func TestLiveRunnerReconnectCircuitBreakerDoesNotStopRunner(t *testing.T) {
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v3/ticker/price":
+		case "/fapi/v1/listenKey":
+			_ = writeJSON(w, http.StatusOK, map[string]any{"listenKey": "lk-test"})
+		case "/fapi/v1/ticker/price":
 			_ = writeJSON(w, http.StatusOK, map[string]string{
 				"symbol": "BTCUSDT",
 				"price":  "100",
 			})
-		case "/api/v3/openOrders":
+		case "/fapi/v1/openOrders":
 			_ = writeJSON(w, http.StatusOK, []any{})
 		default:
 			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
@@ -587,7 +580,7 @@ func TestLiveRunnerReconnectCircuitBreakerDoesNotStopRunner(t *testing.T) {
 		APIKey:            "k",
 		APISecret:         "s",
 		RestBaseURL:       rest.URL,
-		WSBaseURL:         "ws://127.0.0.1:1/ws-api/v3",
+		WSBaseURL:         "ws://127.0.0.1:1/",
 		Symbol:            "BTCUSDT",
 		ClientOrderPrefix: "test",
 		UserStreamAuth:    "signature",
@@ -624,12 +617,14 @@ func TestLiveRunnerPersistsRuntimeStatus(t *testing.T) {
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v3/ticker/price":
+		case "/fapi/v1/listenKey":
+			_ = writeJSON(w, http.StatusOK, map[string]any{"listenKey": "lk-test"})
+		case "/fapi/v1/ticker/price":
 			_ = writeJSON(w, http.StatusOK, map[string]string{
 				"symbol": "BTCUSDT",
 				"price":  "100",
 			})
-		case "/api/v3/openOrders":
+		case "/fapi/v1/openOrders":
 			_ = writeJSON(w, http.StatusOK, []any{})
 		default:
 			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
@@ -648,17 +643,7 @@ func TestLiveRunnerPersistsRuntimeStatus(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-
-		reqID, err := readWSReqID(conn)
-		if err != nil {
-			recordAsyncErr(asyncErrs, err)
-			return
-		}
-		if err := writeWSResponse(conn, reqID); err != nil {
-			recordAsyncErr(asyncErrs, err)
-			return
-		}
-		if err := writeExecutionReport(conn, executionReportPayload{
+		if err := writeOrderTradeUpdate(conn, orderTradeUpdatePayload{
 			OrderID:   62001,
 			TradeID:   72001,
 			Side:      "BUY",
@@ -740,12 +725,14 @@ func TestLiveRunnerPersistsReconnectAttemptsOnCircuitTrip(t *testing.T) {
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v3/ticker/price":
+		case "/fapi/v1/listenKey":
+			_ = writeJSON(w, http.StatusOK, map[string]any{"listenKey": "lk-test"})
+		case "/fapi/v1/ticker/price":
 			_ = writeJSON(w, http.StatusOK, map[string]string{
 				"symbol": "BTCUSDT",
 				"price":  "100",
 			})
-		case "/api/v3/openOrders":
+		case "/fapi/v1/openOrders":
 			_ = writeJSON(w, http.StatusOK, []any{})
 		default:
 			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
@@ -758,7 +745,7 @@ func TestLiveRunnerPersistsReconnectAttemptsOnCircuitTrip(t *testing.T) {
 		APIKey:            "k",
 		APISecret:         "s",
 		RestBaseURL:       rest.URL,
-		WSBaseURL:         "ws://127.0.0.1:1/ws-api/v3",
+		WSBaseURL:         "ws://127.0.0.1:1/",
 		Symbol:            "BTCUSDT",
 		ClientOrderPrefix: "test",
 		UserStreamAuth:    "signature",
@@ -852,12 +839,14 @@ func TestLiveRunOncePeriodicReconcile(t *testing.T) {
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v3/ticker/price":
+		case "/fapi/v1/listenKey":
+			_ = writeJSON(w, http.StatusOK, map[string]any{"listenKey": "lk-test"})
+		case "/fapi/v1/ticker/price":
 			_ = writeJSON(w, http.StatusOK, map[string]string{
 				"symbol": "BTCUSDT",
 				"price":  "100",
 			})
-		case "/api/v3/openOrders":
+		case "/fapi/v1/openOrders":
 			atomic.AddInt32(&openOrdersCalls, 1)
 			_ = writeJSON(w, http.StatusOK, []any{})
 		default:
@@ -877,16 +866,6 @@ func TestLiveRunOncePeriodicReconcile(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-
-		reqID, err := readWSReqID(conn)
-		if err != nil {
-			recordAsyncErr(asyncErrs, err)
-			return
-		}
-		if err := writeWSResponse(conn, reqID); err != nil {
-			recordAsyncErr(asyncErrs, err)
-			return
-		}
 
 		time.Sleep(300 * time.Millisecond)
 	}))
@@ -941,12 +920,14 @@ func TestLiveRunOncePeriodicReconcileStopsCleanlyOnErrStopped(t *testing.T) {
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v3/ticker/price":
+		case "/fapi/v1/listenKey":
+			_ = writeJSON(w, http.StatusOK, map[string]any{"listenKey": "lk-test"})
+		case "/fapi/v1/ticker/price":
 			_ = writeJSON(w, http.StatusOK, map[string]string{
 				"symbol": "BTCUSDT",
 				"price":  "100",
 			})
-		case "/api/v3/openOrders":
+		case "/fapi/v1/openOrders":
 			_ = writeJSON(w, http.StatusOK, []any{})
 		default:
 			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
@@ -965,16 +946,6 @@ func TestLiveRunOncePeriodicReconcileStopsCleanlyOnErrStopped(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-
-		reqID, err := readWSReqID(conn)
-		if err != nil {
-			recordAsyncErr(asyncErrs, err)
-			return
-		}
-		if err := writeWSResponse(conn, reqID); err != nil {
-			recordAsyncErr(asyncErrs, err)
-			return
-		}
 		time.Sleep(300 * time.Millisecond)
 	}))
 	defer ws.Close()
@@ -1027,12 +998,14 @@ func TestLiveRunnerStopsOnFatalLocalErrorWithoutReconnectTrip(t *testing.T) {
 
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v3/ticker/price":
+		case "/fapi/v1/listenKey":
+			_ = writeJSON(w, http.StatusOK, map[string]any{"listenKey": "lk-test"})
+		case "/fapi/v1/ticker/price":
 			_ = writeJSON(w, http.StatusOK, map[string]string{
 				"symbol": "BTCUSDT",
 				"price":  "100",
 			})
-		case "/api/v3/openOrders":
+		case "/fapi/v1/openOrders":
 			_ = writeJSON(w, http.StatusOK, []any{})
 		default:
 			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
@@ -1051,17 +1024,7 @@ func TestLiveRunnerStopsOnFatalLocalErrorWithoutReconnectTrip(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-
-		reqID, err := readWSReqID(conn)
-		if err != nil {
-			recordAsyncErr(asyncErrs, err)
-			return
-		}
-		if err := writeWSResponse(conn, reqID); err != nil {
-			recordAsyncErr(asyncErrs, err)
-			return
-		}
-		if err := writeExecutionReport(conn, executionReportPayload{
+		if err := writeOrderTradeUpdate(conn, orderTradeUpdatePayload{
 			OrderID:   82001,
 			TradeID:   92001,
 			Side:      "BUY",
@@ -1302,7 +1265,7 @@ func TestLiveRunnerRecordTradeLedgerMakesTradeSkippableAcrossRestart(t *testing.
 	}
 }
 
-type executionReportPayload struct {
+type orderTradeUpdatePayload struct {
 	OrderID   int64
 	TradeID   int64
 	Side      string
@@ -1313,54 +1276,29 @@ type executionReportPayload struct {
 	CumQty    string
 }
 
-func writeExecutionReport(conn *websocket.Conn, p executionReportPayload) error {
+func writeOrderTradeUpdate(conn *websocket.Conn, p orderTradeUpdatePayload) error {
 	ts := time.Now().UTC().UnixMilli()
 	msg := map[string]any{
-		"e": "executionReport",
+		"e": "ORDER_TRADE_UPDATE",
 		"E": ts,
-		"s": "BTCUSDT",
-		"i": p.OrderID,
-		"S": p.Side,
-		"x": "TRADE",
-		"X": p.Status,
-		"p": p.LastPrice,
-		"q": p.OrderQty,
-		"L": p.LastPrice,
-		"l": p.LastQty,
-		"z": p.CumQty,
 		"T": ts,
-		"t": p.TradeID,
+		"o": map[string]any{
+			"s":  "BTCUSDT",
+			"i":  p.OrderID,
+			"S":  p.Side,
+			"x":  "TRADE",
+			"X":  p.Status,
+			"p":  p.LastPrice,
+			"ap": p.LastPrice,
+			"L":  p.LastPrice,
+			"l":  p.LastQty,
+			"T":  ts,
+			"t":  p.TradeID,
+			"ps": "BOTH",
+			"R":  false,
+		},
 	}
 	return conn.WriteJSON(msg)
-}
-
-func readWSReqID(conn *websocket.Conn) (string, error) {
-	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	defer conn.SetReadDeadline(time.Time{})
-
-	_, data, err := conn.ReadMessage()
-	if err != nil {
-		return "", err
-	}
-	var req struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(data, &req); err != nil {
-		return "", err
-	}
-	if req.ID == "" {
-		return "", errors.New("ws request id is empty")
-	}
-	return req.ID, nil
-}
-
-func writeWSResponse(conn *websocket.Conn, reqID string) error {
-	resp := map[string]any{
-		"id":     reqID,
-		"status": 200,
-		"result": map[string]any{},
-	}
-	return conn.WriteJSON(resp)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) error {

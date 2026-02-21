@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	defaultBaseURL = "https://api.binance.com"
+	defaultBaseURL = "https://fapi.binance.com"
 	defaultOutDir  = "data/binance"
 )
 
@@ -207,7 +207,7 @@ func main() {
 }
 
 func fetchKlines(client *http.Client, baseURL, symbol, interval string, startMs, endMs int64, limit int) ([]kline, error) {
-	endpoint := baseURL + "/api/v3/klines"
+	endpoint := baseURL + "/fapi/v1/klines"
 	values := url.Values{}
 	values.Set("symbol", symbol)
 	values.Set("interval", interval)

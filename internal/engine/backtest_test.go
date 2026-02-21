@@ -312,17 +312,17 @@ func TestBacktestRunnerUsesMaxLockedCapitalForTotalReturnPct(t *testing.T) {
 	if !res.ProfitQuote.Equal(decimal.NewFromInt(20)) {
 		t.Fatalf("ProfitQuote = %s, want 20", res.ProfitQuote)
 	}
-	if !res.MaxLockedCapital.Equal(decimal.NewFromInt(100)) {
-		t.Fatalf("MaxLockedCapital = %s, want 100", res.MaxLockedCapital)
+	if !res.MaxLockedCapital.Equal(decimal.NewFromInt(120)) {
+		t.Fatalf("MaxLockedCapital = %s, want 120", res.MaxLockedCapital)
 	}
 	if !res.EquityReturnPct.Equal(decimal.NewFromInt(2)) {
 		t.Fatalf("EquityReturnPct = %s, want 2", res.EquityReturnPct)
 	}
-	if !res.TotalReturnPct.Equal(decimal.NewFromInt(20)) {
-		t.Fatalf("TotalReturnPct = %s, want 20", res.TotalReturnPct)
+	if res.TotalReturnPct.StringFixed(4) != "16.6667" {
+		t.Fatalf("TotalReturnPct = %s, want 16.6667", res.TotalReturnPct.StringFixed(4))
 	}
-	if !res.CapitalDrawdownPct.Equal(decimal.NewFromInt(20)) {
-		t.Fatalf("CapitalDrawdownPct = %s, want 20", res.CapitalDrawdownPct)
+	if res.CapitalDrawdownPct.StringFixed(4) != "16.6667" {
+		t.Fatalf("CapitalDrawdownPct = %s, want 16.6667", res.CapitalDrawdownPct.StringFixed(4))
 	}
 }
 

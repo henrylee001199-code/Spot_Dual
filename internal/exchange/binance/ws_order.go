@@ -31,38 +31,7 @@ func (c *Client) PlaceOrder(ctx context.Context, order core.Order) (core.Order, 
 	if order.ClientID == "" {
 		order.ClientID = newClientOrderID(c.getClientOrderPrefix())
 	}
-	placed, err := c.placeOrderWS(ctx, order)
-	if err == nil {
-		if c.clearWSDegraded() {
-			c.alertImportant("ws_order_recovered", map[string]string{
-				"symbol": order.Symbol,
-			})
-		}
-		return placed, nil
-	}
-	c.markWSDegraded()
-	c.alertImportant("ws_order_fallback_to_rest", map[string]string{
-		"symbol":    order.Symbol,
-		"side":      string(order.Side),
-		"type":      string(order.Type),
-		"price":     order.Price.String(),
-		"qty":       order.Qty.String(),
-		"client_id": order.ClientID,
-		"ws_error":  err.Error(),
-	})
-	placed, restErr := c.placeOrderREST(ctx, order)
-	if restErr != nil {
-		c.alertImportant("rest_order_failed", map[string]string{
-			"symbol":    order.Symbol,
-			"side":      string(order.Side),
-			"type":      string(order.Type),
-			"price":     order.Price.String(),
-			"qty":       order.Qty.String(),
-			"client_id": order.ClientID,
-			"rest_err":  restErr.Error(),
-		})
-	}
-	return placed, restErr
+	return c.placeOrderREST(ctx, order)
 }
 
 func (c *Client) placeOrderWS(ctx context.Context, order core.Order) (core.Order, error) {
@@ -173,8 +142,14 @@ func (c *Client) placeOrderREST(ctx context.Context, order core.Order) (core.Ord
 	if order.ClientID != "" {
 		params.Set("newClientOrderId", order.ClientID)
 	}
+	if order.PositionSide != "" {
+		params.Set("positionSide", string(order.PositionSide))
+	}
+	if order.ReduceOnly {
+		params.Set("reduceOnly", "true")
+	}
 
-	body, err := c.doRequest(ctx, http.MethodPost, "/api/v3/order", params, AuthSigned)
+	body, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/order", params, AuthSigned)
 	if err != nil {
 		if errors.Is(err, core.ErrOrderRejected) || errors.Is(err, core.ErrOrderExpired) {
 			errorCode := "unknown"
@@ -206,7 +181,19 @@ func (c *Client) placeOrderREST(ctx context.Context, order core.Order) (core.Ord
 		return core.Order{}, err
 	}
 	order.ID = strconv.FormatInt(resp.OrderID, 10)
-	order.Status = core.OrderNew
+	order.ClientID = resp.ClientOrderID
+	if resp.PositionSide != "" {
+		order.PositionSide = core.PositionSide(resp.PositionSide)
+	}
+	order.ReduceOnly = resp.ReduceOnly
+	if resp.Status != "" {
+		order.Status = core.OrderStatus(resp.Status)
+	} else {
+		order.Status = core.OrderNew
+	}
+	if resp.UpdateTime > 0 {
+		order.CreatedAt = time.UnixMilli(resp.UpdateTime)
+	}
 	return order, nil
 }
 
@@ -217,12 +204,6 @@ func (c *Client) ensureOrderConn(ctx context.Context) (*websocket.Conn, error) {
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, c.wsBaseURL, nil)
 	if err != nil {
 		return nil, err
-	}
-	if c.userStreamAuth == "session" {
-		if err := c.sessionLogon(ctx, conn); err != nil {
-			_ = conn.Close()
-			return nil, err
-		}
 	}
 	ow := &orderWSConn{conn: conn, stop: make(chan struct{})}
 	c.orderConn = ow
@@ -245,7 +226,7 @@ func (c *Client) getOrderByClientID(ctx context.Context, symbol, clientID string
 	params := url.Values{}
 	params.Set("symbol", symbol)
 	params.Set("origClientOrderId", clientID)
-	body, err := c.doRequest(ctx, http.MethodGet, "/api/v3/order", params, AuthSigned)
+	body, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/order", params, AuthSigned)
 	if err != nil {
 		return core.Order{}, err
 	}
@@ -262,14 +243,16 @@ func (c *Client) getOrderByClientID(ctx context.Context, symbol, clientID string
 		return core.Order{}, err
 	}
 	return core.Order{
-		ID:       strconv.FormatInt(resp.OrderID, 10),
-		ClientID: resp.ClientOrderID,
-		Symbol:   resp.Symbol,
-		Side:     core.Side(resp.Side),
-		Type:     core.OrderType(resp.Type),
-		Price:    price,
-		Qty:      qty,
-		Status:   core.OrderStatus(resp.Status),
+		ID:           strconv.FormatInt(resp.OrderID, 10),
+		ClientID:     resp.ClientOrderID,
+		Symbol:       resp.Symbol,
+		Side:         core.Side(resp.Side),
+		Type:         core.OrderType(resp.Type),
+		PositionSide: core.PositionSide(resp.PositionSide),
+		ReduceOnly:   resp.ReduceOnly,
+		Price:        price,
+		Qty:          qty,
+		Status:       core.OrderStatus(resp.Status),
 	}, nil
 }
 

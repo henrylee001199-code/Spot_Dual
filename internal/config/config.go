@@ -15,7 +15,9 @@ import (
 type Mode string
 
 type GridMode string
-type UserStreamAuth string
+type ContractMode string
+type PositionMode string
+type MarginType string
 
 const (
 	ModeBacktest Mode = "backtest"
@@ -28,8 +30,19 @@ const (
 )
 
 const (
-	UserStreamAuthSignature UserStreamAuth = "signature"
-	UserStreamAuthSession   UserStreamAuth = "session"
+	ContractModeDual  ContractMode = "dual"
+	ContractModeLong  ContractMode = "long"
+	ContractModeShort ContractMode = "short"
+)
+
+const (
+	PositionModeHedge  PositionMode = "hedge"
+	PositionModeOneWay PositionMode = "oneway"
+)
+
+const (
+	MarginTypeCross    MarginType = "cross"
+	MarginTypeIsolated MarginType = "isolated"
 )
 
 type Config struct {
@@ -45,16 +58,17 @@ type Config struct {
 }
 
 type GridConfig struct {
-	StopPrice        Decimal  `yaml:"stop_price"`
-	Ratio            Decimal  `yaml:"ratio"`
-	RatioStep        *Decimal `yaml:"ratio_step"`
-	RatioQtyMultiple Decimal  `yaml:"ratio_qty_multiple"`
-	SellRatio        Decimal  `yaml:"sell_ratio"`
-	Levels           int      `yaml:"levels"`
-	ShiftLevels      int      `yaml:"shift_levels"`
-	Mode             GridMode `yaml:"mode"`
-	Qty              Decimal  `yaml:"qty"`
-	MinQtyMultiple   int64    `yaml:"min_qty_multiple"`
+	ContractMode     ContractMode `yaml:"contract_mode"`
+	StopPrice        Decimal      `yaml:"stop_price"`
+	Ratio            Decimal      `yaml:"ratio"`
+	RatioStep        *Decimal     `yaml:"ratio_step"`
+	RatioQtyMultiple Decimal      `yaml:"ratio_qty_multiple"`
+	SellRatio        Decimal      `yaml:"sell_ratio"`
+	Levels           int          `yaml:"levels"`
+	ShiftLevels      int          `yaml:"shift_levels"`
+	Mode             GridMode     `yaml:"mode"`
+	Qty              Decimal      `yaml:"qty"`
+	MinQtyMultiple   int64        `yaml:"min_qty_multiple"`
 }
 
 type BacktestConfig struct {
@@ -78,16 +92,17 @@ type BacktestRules struct {
 }
 
 type ExchangeConfig struct {
-	APIKey                 string         `yaml:"api_key"`
-	APISecret              string         `yaml:"api_secret"`
-	RestBaseURL            string         `yaml:"rest_base_url"`
-	WSBaseURL              string         `yaml:"ws_base_url"`
-	UserStreamAuth         UserStreamAuth `yaml:"user_stream_auth"`
-	WSEd25519KeyPath       string         `yaml:"ws_ed25519_private_key_path"`
-	RecvWindowMs           int64          `yaml:"recv_window_ms"`
-	HTTPTimeoutSec         int64          `yaml:"http_timeout_sec"`
-	UserStreamKeepaliveSec int64          `yaml:"user_stream_keepalive_sec"`
-	OrderWSKeepaliveSec    int64          `yaml:"order_ws_keepalive_sec"`
+	APIKey                 string       `yaml:"api_key"`
+	APISecret              string       `yaml:"api_secret"`
+	RestBaseURL            string       `yaml:"rest_base_url"`
+	WSBaseURL              string       `yaml:"ws_base_url"`
+	PositionMode           PositionMode `yaml:"position_mode"`
+	MarginType             MarginType   `yaml:"margin_type"`
+	Leverage               int          `yaml:"leverage"`
+	RecvWindowMs           int64        `yaml:"recv_window_ms"`
+	HTTPTimeoutSec         int64        `yaml:"http_timeout_sec"`
+	UserStreamKeepaliveSec int64        `yaml:"user_stream_keepalive_sec"`
+	OrderWSKeepaliveSec    int64        `yaml:"order_ws_keepalive_sec"`
 }
 
 type StateConfig struct {
@@ -154,21 +169,21 @@ func (c *Config) normalize() {
 	c.Symbol = strings.ToUpper(strings.TrimSpace(c.Symbol))
 	c.InstanceID = strings.ToLower(strings.TrimSpace(c.InstanceID))
 	c.Grid.Mode = GridMode(strings.ToLower(strings.TrimSpace(string(c.Grid.Mode))))
+	c.Grid.ContractMode = ContractMode(strings.ToLower(strings.TrimSpace(string(c.Grid.ContractMode))))
 	c.Exchange.APIKey = strings.TrimSpace(c.Exchange.APIKey)
 	c.Exchange.APISecret = strings.TrimSpace(c.Exchange.APISecret)
 	c.Exchange.RestBaseURL = strings.TrimSpace(c.Exchange.RestBaseURL)
 	c.Exchange.WSBaseURL = strings.TrimSpace(c.Exchange.WSBaseURL)
-	c.Exchange.WSEd25519KeyPath = strings.TrimSpace(c.Exchange.WSEd25519KeyPath)
+	c.Exchange.PositionMode = PositionMode(strings.ToLower(strings.TrimSpace(string(c.Exchange.PositionMode))))
+	c.Exchange.MarginType = MarginType(strings.ToLower(strings.TrimSpace(string(c.Exchange.MarginType))))
 	c.State.Dir = strings.TrimSpace(c.State.Dir)
 	c.Backtest.DataPath = strings.TrimSpace(c.Backtest.DataPath)
 	c.Observability.Telegram.BotToken = strings.TrimSpace(c.Observability.Telegram.BotToken)
 	c.Observability.Telegram.ChatID = strings.TrimSpace(c.Observability.Telegram.ChatID)
 	c.Observability.Telegram.APIBaseURL = strings.TrimSpace(c.Observability.Telegram.APIBaseURL)
-	auth := strings.ToLower(strings.TrimSpace(string(c.Exchange.UserStreamAuth)))
-	if auth == "apikey" {
-		auth = "session"
+	if c.Exchange.PositionMode == "one_way" {
+		c.Exchange.PositionMode = PositionModeOneWay
 	}
-	c.Exchange.UserStreamAuth = UserStreamAuth(auth)
 }
 
 func (c *Config) applyDefaults() {
@@ -196,8 +211,18 @@ func (c *Config) applyDefaults() {
 			c.Grid.ShiftLevels = 1
 		}
 	}
-	if c.Exchange.UserStreamAuth == "" {
-		c.Exchange.UserStreamAuth = UserStreamAuthSignature
+	if c.Exchange.PositionMode == "" {
+		if c.Grid.ContractMode == ContractModeDual {
+			c.Exchange.PositionMode = PositionModeHedge
+		} else {
+			c.Exchange.PositionMode = PositionModeOneWay
+		}
+	}
+	if c.Exchange.MarginType == "" {
+		c.Exchange.MarginType = MarginTypeCross
+	}
+	if c.Exchange.Leverage == 0 {
+		c.Exchange.Leverage = 1
 	}
 	if c.Exchange.RecvWindowMs == 0 {
 		c.Exchange.RecvWindowMs = 5000
@@ -227,7 +252,7 @@ func (c *Config) applyDefaults() {
 		c.CircuitBreaker.ReconnectProbePasses = 1
 	}
 	if c.State.Dir == "" {
-		c.State.Dir = "state"
+		c.State.Dir = "state_futures"
 	}
 	if c.State.LockTakeover == nil {
 		enabled := true
@@ -251,17 +276,17 @@ func (c *Config) applyDefaults() {
 	if c.Exchange.RestBaseURL == "" {
 		switch c.Mode {
 		case ModeTestnet:
-			c.Exchange.RestBaseURL = "https://testnet.binance.vision"
+			c.Exchange.RestBaseURL = "https://testnet.binancefuture.com"
 		case ModeLive:
-			c.Exchange.RestBaseURL = "https://api.binance.com"
+			c.Exchange.RestBaseURL = "https://fapi.binance.com"
 		}
 	}
 	if c.Exchange.WSBaseURL == "" {
 		switch c.Mode {
 		case ModeTestnet:
-			c.Exchange.WSBaseURL = "wss://ws-api.testnet.binance.vision/ws-api/v3"
+			c.Exchange.WSBaseURL = "wss://stream.binancefuture.com"
 		case ModeLive:
-			c.Exchange.WSBaseURL = "wss://ws-api.binance.com/ws-api/v3"
+			c.Exchange.WSBaseURL = "wss://fstream.binance.com"
 		}
 	}
 }
@@ -286,6 +311,12 @@ func (c Config) Validate() error {
 	}
 	if c.Grid.Mode != GridGeo {
 		return fmt.Errorf("grid mode must be geometric")
+	}
+	if c.Grid.ContractMode == "" {
+		return fmt.Errorf("grid contract_mode is required")
+	}
+	if c.Grid.ContractMode != ContractModeDual && c.Grid.ContractMode != ContractModeLong && c.Grid.ContractMode != ContractModeShort {
+		return fmt.Errorf("grid contract_mode must be dual, long, or short")
 	}
 	if c.Grid.ShiftLevels < 1 || c.Grid.ShiftLevels > c.Grid.Levels {
 		return fmt.Errorf("shift_levels must be between 1 and levels")
@@ -409,11 +440,17 @@ func (c Config) Validate() error {
 		if err := validateURL(c.Exchange.WSBaseURL, "ws", "wss"); err != nil {
 			return fmt.Errorf("exchange ws_base_url %v", err)
 		}
-		if c.Exchange.UserStreamAuth != UserStreamAuthSignature && c.Exchange.UserStreamAuth != UserStreamAuthSession {
-			return fmt.Errorf("exchange user_stream_auth must be signature or session")
+		if c.Exchange.PositionMode != PositionModeHedge && c.Exchange.PositionMode != PositionModeOneWay {
+			return fmt.Errorf("exchange position_mode must be hedge or oneway")
 		}
-		if c.Exchange.UserStreamAuth == UserStreamAuthSession && c.Exchange.WSEd25519KeyPath == "" {
-			return fmt.Errorf("exchange ws_ed25519_private_key_path is required for session auth")
+		if c.Grid.ContractMode == ContractModeDual && c.Exchange.PositionMode != PositionModeHedge {
+			return fmt.Errorf("grid contract_mode=dual requires exchange position_mode=hedge")
+		}
+		if c.Exchange.MarginType != MarginTypeCross && c.Exchange.MarginType != MarginTypeIsolated {
+			return fmt.Errorf("exchange margin_type must be cross or isolated")
+		}
+		if c.Exchange.Leverage < 1 || c.Exchange.Leverage > 125 {
+			return fmt.Errorf("exchange leverage must be between 1 and 125")
 		}
 	}
 	return nil

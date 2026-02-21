@@ -8,15 +8,18 @@ import (
 )
 
 const (
-	apiCodeNewOrderRejected = -2010
-	apiCodeCancelRejected   = -2011
-	apiCodeOrderNotFound    = -2013
+	apiCodeNewOrderRejected   = -2010
+	apiCodeCancelRejected     = -2011
+	apiCodeOrderNotFound      = -2013
+	apiCodeMarginInsufficient = -2019
 )
 
 var apiErrorMessageKinds = map[string]error{
 	"duplicate order sent.":                                  core.ErrDuplicateOrder,
 	"account has insufficient balance for requested action.": core.ErrInsufficientBalance,
 	"balance is insufficient.":                               core.ErrInsufficientBalance,
+	"margin is insufficient.":                                core.ErrInsufficientBalance,
+	"insufficient margin.":                                   core.ErrInsufficientBalance,
 	"unknown order sent.":                                    core.ErrOrderNotFound,
 	"order does not exist.":                                  core.ErrOrderNotFound,
 	"order was canceled or expired.":                         core.ErrOrderExpired,
@@ -44,6 +47,8 @@ func classifyAPIErrorKinds(apiErr APIError) []error {
 	switch apiErr.Code {
 	case apiCodeOrderNotFound, apiCodeCancelRejected:
 		kinds = appendErrorKind(kinds, core.ErrOrderNotFound)
+	case apiCodeMarginInsufficient:
+		kinds = appendErrorKind(kinds, core.ErrInsufficientBalance)
 	case apiCodeNewOrderRejected:
 		if kind, ok := apiErrorMessageKinds[normalizedMsg]; ok {
 			kinds = appendErrorKind(kinds, kind)

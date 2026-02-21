@@ -19,6 +19,23 @@ type notifierSpy struct {
 	msgs []string
 }
 
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
 func (n *notifierSpy) Notify(ctx context.Context, msg string) error {
 	if n.entered != nil {
 		n.once.Do(func() {
@@ -161,10 +178,10 @@ func TestManagerTracksDroppedCountAndPendingWindow(t *testing.T) {
 }
 
 func TestManagerPeriodicDroppedReportEmitsAndResetsWindow(t *testing.T) {
-	var logs bytes.Buffer
+	logs := &syncBuffer{}
 	origOutput := log.Writer()
 	origFlags := log.Flags()
-	log.SetOutput(&logs)
+	log.SetOutput(logs)
 	log.SetFlags(0)
 	defer func() {
 		log.SetOutput(origOutput)

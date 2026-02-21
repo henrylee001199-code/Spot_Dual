@@ -14,6 +14,7 @@ func TestLoadDefaultsGridModeToGeometric(t *testing.T) {
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   levels: 20
   qty: "0.001"
@@ -60,8 +61,44 @@ backtest:
 	if cfg.State.LockStaleSec != 600 {
 		t.Fatalf("state.lock_stale_sec = %d, want 600", cfg.State.LockStaleSec)
 	}
+	if cfg.State.Dir != "state_futures" {
+		t.Fatalf("state.dir = %q, want state_futures", cfg.State.Dir)
+	}
 	if cfg.State.LockTakeover == nil || !*cfg.State.LockTakeover {
 		t.Fatalf("state.lock_takeover = %v, want true", cfg.State.LockTakeover)
+	}
+}
+
+func TestLoadRequiresExplicitContractMode(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+mode: backtest
+symbol: BTCUSDT
+
+grid:
+  ratio: "1.01"
+  levels: 20
+  qty: "0.001"
+
+backtest:
+  data_path: data/binance/BTCUSDT/1m
+  initial_base: "0"
+  initial_quote: "1000"
+  fees:
+    maker_rate: "0"
+    taker_rate: "0"
+  rules:
+    min_qty: "0"
+    min_notional: "0"
+    price_tick: "0"
+    qty_step: "0"
+`)
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatalf("Load() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "grid contract_mode is required") {
+		t.Fatalf("Load() error = %q, want explicit contract_mode validation", err.Error())
 	}
 }
 
@@ -71,6 +108,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   levels: 20
   mode: linear
@@ -105,6 +143,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   levels: 20
   qty: "0.001"
@@ -140,6 +179,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   high: "100000"
   ratio: "1.01"
   levels: 20
@@ -168,12 +208,52 @@ backtest:
 	}
 }
 
+func TestLoadRejectsLegacyExchangeUserStreamAuthField(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+mode: testnet
+symbol: BTCUSDT
+
+grid:
+  contract_mode: dual
+  ratio: "1.01"
+  levels: 20
+  qty: "0.001"
+
+exchange:
+  api_key: "k"
+  api_secret: "s"
+  user_stream_auth: signature
+
+backtest:
+  data_path: data/binance/BTCUSDT/1m
+  initial_base: "0"
+  initial_quote: "1000"
+  fees:
+    maker_rate: "0"
+    taker_rate: "0"
+  rules:
+    min_qty: "0"
+    min_notional: "0"
+    price_tick: "0"
+    qty_step: "0"
+`)
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatalf("Load() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "field user_stream_auth not found") {
+		t.Fatalf("Load() error = %q, want unknown user_stream_auth field message", err.Error())
+	}
+}
+
 func TestLoadRejectsInvalidSellRatio(t *testing.T) {
 	cfgPath := writeTempConfig(t, `
 mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   sell_ratio: "1"
   levels: 20
@@ -208,6 +288,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   ratio_step: "-0.001"
   levels: 20
@@ -242,6 +323,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   ratio_step: "0"
   levels: 20
@@ -279,6 +361,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   ratio_step: "0.0025"
   levels: 20
@@ -317,6 +400,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   ratio_qty_multiple: "1.2"
   levels: 20
@@ -351,6 +435,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   ratio_qty_multiple: "-1"
   levels: 20
@@ -385,6 +470,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   levels: 20
   qty: "0.001"
@@ -420,6 +506,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   levels: 20
   qty: "0.001"
@@ -455,6 +542,7 @@ symbol:  btcusdt
 instance_id:  BOT_A1
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   levels: 20
   qty: "0.001"
@@ -491,6 +579,7 @@ mode: paper
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   levels: 20
   qty: "0.001"
@@ -524,6 +613,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   levels: 20
   qty: "0.001"
@@ -561,6 +651,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   levels: 20
   qty: "0.001"
@@ -598,6 +689,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   levels: 20
   qty: "0.001"
@@ -635,6 +727,7 @@ mode: testnet
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   levels: 20
   qty: "0.001"
@@ -673,6 +766,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   levels: 20
   qty: "0.001"
@@ -711,6 +805,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   levels: 20
   qty: "0.001"
@@ -746,6 +841,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   levels: 20
   qty: "0.001"
@@ -782,6 +878,7 @@ mode: backtest
 symbol: BTCUSDT
 
 grid:
+  contract_mode: dual
   ratio: "1.01"
   levels: 20
   qty: "0.001"

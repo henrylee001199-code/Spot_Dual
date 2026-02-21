@@ -12,28 +12,27 @@ import (
 )
 
 type SimExchange struct {
-	symbol      string
-	rules       core.Rules
-	balanceFree core.Balance
-	baseLocked  decimal.Decimal
-	quoteLocked decimal.Decimal
-	openOrders  map[string]*core.Order
-	orderSeq    int
-	lastPrice   decimal.Decimal
-	makerFee    decimal.Decimal
-	takerFee    decimal.Decimal
-	feePaid     decimal.Decimal
-	marketBuyN  int
-	marketBuyQ  decimal.Decimal
+	symbol        string
+	rules         core.Rules
+	walletQuote   decimal.Decimal
+	positionQty   decimal.Decimal
+	positionEntry decimal.Decimal
+	openOrders    map[string]*core.Order
+	orderSeq      int
+	lastPrice     decimal.Decimal
+	makerFee      decimal.Decimal
+	takerFee      decimal.Decimal
+	feePaid       decimal.Decimal
+	marketBuyN    int
+	marketBuyQ    decimal.Decimal
 }
 
 func NewSimExchange(symbol string, balance core.Balance, rules core.Rules) *SimExchange {
 	return &SimExchange{
 		symbol:      symbol,
 		rules:       rules,
-		balanceFree: balance,
-		baseLocked:  decimal.Zero,
-		quoteLocked: decimal.Zero,
+		walletQuote: balance.Quote,
+		positionQty: balance.Base,
 		openOrders:  make(map[string]*core.Order),
 		lastPrice:   decimal.Zero,
 		makerFee:    decimal.Zero,
@@ -65,17 +64,20 @@ type Snapshot struct {
 }
 
 func (s *SimExchange) Snapshot(price decimal.Decimal) Snapshot {
-	totalBase := s.balanceFree.Base.Add(s.baseLocked)
-	totalQuote := s.balanceFree.Quote.Add(s.quoteLocked)
-	lockedCapital := s.quoteLocked.Add(s.baseLocked.Mul(price))
+	if price.Cmp(decimal.Zero) <= 0 {
+		price = s.lastPrice
+	}
+	unrealized := s.unrealizedPnL(price)
+	equity := s.walletQuote.Add(unrealized)
+	lockedCapital := s.positionQty.Abs().Mul(price)
 	return Snapshot{
-		FreeBase:      s.balanceFree.Base,
-		FreeQuote:     s.balanceFree.Quote,
-		LockedBase:    s.baseLocked,
-		LockedQuote:   s.quoteLocked,
-		TotalBase:     totalBase,
-		TotalQuote:    totalQuote,
-		EquityQuote:   totalQuote.Add(totalBase.Mul(price)),
+		FreeBase:      s.positionQty,
+		FreeQuote:     s.walletQuote,
+		LockedBase:    decimal.Zero,
+		LockedQuote:   decimal.Zero,
+		TotalBase:     s.positionQty,
+		TotalQuote:    s.walletQuote,
+		EquityQuote:   equity,
 		LockedCapital: lockedCapital,
 		FeePaidQuote:  s.feePaid,
 	}
@@ -109,30 +111,15 @@ func (s *SimExchange) PlaceOrder(ctx context.Context, order core.Order) (core.Or
 	order.ID = fmt.Sprintf("bt-%d", s.orderSeq)
 	order.CreatedAt = time.Now()
 	if order.Type == core.Market {
-		if err := s.applyMarketFill(&order); err != nil {
-			return core.Order{}, err
-		}
+		s.applyFill(order.Side, order.Qty, order.Price, s.takerFee)
 		order.Status = core.OrderFilled
 		filledAt := time.Now()
 		order.FilledAt = &filledAt
+		if order.Side == core.Buy {
+			s.marketBuyN++
+			s.marketBuyQ = s.marketBuyQ.Add(order.Qty)
+		}
 		return order, nil
-	}
-	switch order.Side {
-	case core.Buy:
-		reserve := s.reservedBuyQuote(order.Price, order.Qty, s.makerFee)
-		if s.balanceFree.Quote.Cmp(reserve) < 0 {
-			return core.Order{}, fmt.Errorf("%w: quote balance", core.ErrInsufficientBalance)
-		}
-		s.balanceFree.Quote = s.balanceFree.Quote.Sub(reserve)
-		s.quoteLocked = s.quoteLocked.Add(reserve)
-	case core.Sell:
-		if s.balanceFree.Base.Cmp(order.Qty) < 0 {
-			return core.Order{}, fmt.Errorf("%w: base balance", core.ErrInsufficientBalance)
-		}
-		s.balanceFree.Base = s.balanceFree.Base.Sub(order.Qty)
-		s.baseLocked = s.baseLocked.Add(order.Qty)
-	default:
-		return core.Order{}, errors.New("unknown side")
 	}
 	order.Status = core.OrderNew
 	s.openOrders[order.ID] = &order
@@ -140,14 +127,13 @@ func (s *SimExchange) PlaceOrder(ctx context.Context, order core.Order) (core.Or
 }
 
 func (s *SimExchange) CancelOrder(ctx context.Context, symbol, orderID string) error {
+	if symbol != s.symbol {
+		return errors.New("unknown symbol")
+	}
 	ord, ok := s.openOrders[orderID]
 	if !ok {
 		return errors.New("order not found")
 	}
-	if symbol != s.symbol {
-		return errors.New("unknown symbol")
-	}
-	s.releaseLocked(ord)
 	ord.Status = core.OrderCanceled
 	delete(s.openOrders, orderID)
 	return nil
@@ -165,14 +151,18 @@ func (s *SimExchange) OpenOrders(ctx context.Context, symbol string) ([]core.Ord
 }
 
 func (s *SimExchange) Balances(ctx context.Context) (core.Balance, error) {
+	equity := s.walletQuote
+	if s.lastPrice.Cmp(decimal.Zero) > 0 {
+		equity = s.walletQuote.Add(s.unrealizedPnL(s.lastPrice))
+	}
 	return core.Balance{
-		Base:  s.balanceFree.Base.Add(s.baseLocked),
-		Quote: s.balanceFree.Quote.Add(s.quoteLocked),
+		Base:  s.positionQty,
+		Quote: equity,
 	}, nil
 }
 
 func (s *SimExchange) FreeBalances() core.Balance {
-	return s.balanceFree
+	return core.Balance{Base: s.positionQty, Quote: s.walletQuote}
 }
 
 func (s *SimExchange) MarketBuyStats() (int, decimal.Decimal) {
@@ -183,23 +173,26 @@ func (s *SimExchange) Match(price decimal.Decimal, ts time.Time) []core.Trade {
 	s.lastPrice = price
 	trades := make([]core.Trade, 0)
 	for id, ord := range s.openOrders {
-		if shouldFill(ord, price) {
-			trade := core.Trade{
-				OrderID: ord.ID,
-				Symbol:  ord.Symbol,
-				Side:    ord.Side,
-				Price:   ord.Price,
-				Qty:     ord.Qty,
-				Status:  core.OrderFilled,
-				Time:    ts,
-			}
-			s.applyLimitFill(ord)
-			ord.Status = core.OrderFilled
-			filledAt := ts
-			ord.FilledAt = &filledAt
-			delete(s.openOrders, id)
-			trades = append(trades, trade)
+		if !shouldFill(ord, price) {
+			continue
 		}
+		trade := core.Trade{
+			OrderID:      ord.ID,
+			Symbol:       ord.Symbol,
+			Side:         ord.Side,
+			PositionSide: ord.PositionSide,
+			ReduceOnly:   ord.ReduceOnly,
+			Price:        ord.Price,
+			Qty:          ord.Qty,
+			Status:       core.OrderFilled,
+			Time:         ts,
+		}
+		s.applyFill(ord.Side, ord.Qty, ord.Price, s.makerFee)
+		ord.Status = core.OrderFilled
+		filledAt := ts
+		ord.FilledAt = &filledAt
+		delete(s.openOrders, id)
+		trades = append(trades, trade)
 	}
 	return trades
 }
@@ -215,65 +208,104 @@ func shouldFill(ord *core.Order, price decimal.Decimal) bool {
 	}
 }
 
-func (s *SimExchange) applyMarketFill(ord *core.Order) error {
-	cost := ord.Price.Mul(ord.Qty)
-	fee := cost.Mul(s.takerFee)
-	switch ord.Side {
+func (s *SimExchange) applyFill(side core.Side, qty, price, feeRate decimal.Decimal) {
+	if qty.Cmp(decimal.Zero) <= 0 || price.Cmp(decimal.Zero) <= 0 {
+		return
+	}
+	notional := price.Mul(qty)
+	fee := notional.Mul(feeRate)
+	s.walletQuote = s.walletQuote.Sub(fee)
+	s.feePaid = s.feePaid.Add(fee)
+
+	switch side {
 	case core.Buy:
-		required := cost.Add(fee)
-		if s.balanceFree.Quote.Cmp(required) < 0 {
-			return fmt.Errorf("%w: quote balance", core.ErrInsufficientBalance)
+		s.applyBuyFill(qty, price)
+	case core.Sell:
+		s.applySellFill(qty, price)
+	}
+}
+
+func (s *SimExchange) applyBuyFill(qty, price decimal.Decimal) {
+	if s.positionQty.Cmp(decimal.Zero) >= 0 {
+		oldQty := s.positionQty
+		newQty := oldQty.Add(qty)
+		if oldQty.Cmp(decimal.Zero) <= 0 {
+			s.positionEntry = price
+		} else {
+			s.positionEntry = weightedPrice(s.positionEntry, oldQty, price, qty)
 		}
-		s.balanceFree.Quote = s.balanceFree.Quote.Sub(required)
-		s.balanceFree.Base = s.balanceFree.Base.Add(ord.Qty)
-		s.feePaid = s.feePaid.Add(fee)
-		s.marketBuyN++
-		s.marketBuyQ = s.marketBuyQ.Add(ord.Qty)
-	case core.Sell:
-		if s.balanceFree.Base.Cmp(ord.Qty) < 0 {
-			return fmt.Errorf("%w: base balance", core.ErrInsufficientBalance)
+		s.positionQty = newQty
+		return
+	}
+
+	shortQty := s.positionQty.Abs()
+	closeQty := minDecimal(qty, shortQty)
+	if closeQty.Cmp(decimal.Zero) > 0 {
+		realized := s.positionEntry.Sub(price).Mul(closeQty)
+		s.walletQuote = s.walletQuote.Add(realized)
+		s.positionQty = s.positionQty.Add(closeQty)
+	}
+	remain := qty.Sub(closeQty)
+	if s.positionQty.Cmp(decimal.Zero) == 0 {
+		s.positionEntry = decimal.Zero
+	}
+	if remain.Cmp(decimal.Zero) > 0 {
+		s.positionEntry = price
+		s.positionQty = s.positionQty.Add(remain)
+	}
+}
+
+func (s *SimExchange) applySellFill(qty, price decimal.Decimal) {
+	if s.positionQty.Cmp(decimal.Zero) <= 0 {
+		oldAbs := s.positionQty.Abs()
+		newAbs := oldAbs.Add(qty)
+		if oldAbs.Cmp(decimal.Zero) <= 0 {
+			s.positionEntry = price
+		} else {
+			s.positionEntry = weightedPrice(s.positionEntry, oldAbs, price, qty)
 		}
-		s.balanceFree.Base = s.balanceFree.Base.Sub(ord.Qty)
-		s.balanceFree.Quote = s.balanceFree.Quote.Add(cost.Sub(fee))
-		s.feePaid = s.feePaid.Add(fee)
-	default:
-		return errors.New("unknown side")
+		s.positionQty = newAbs.Neg()
+		return
 	}
-	return nil
-}
 
-func (s *SimExchange) applyLimitFill(ord *core.Order) {
-	cost := ord.Price.Mul(ord.Qty)
-	fee := cost.Mul(s.makerFee)
-	switch ord.Side {
-	case core.Buy:
-		reserve := s.reservedBuyQuote(ord.Price, ord.Qty, s.makerFee)
-		s.quoteLocked = s.quoteLocked.Sub(reserve)
-		s.balanceFree.Base = s.balanceFree.Base.Add(ord.Qty)
-		s.feePaid = s.feePaid.Add(fee)
-	case core.Sell:
-		s.baseLocked = s.baseLocked.Sub(ord.Qty)
-		s.balanceFree.Quote = s.balanceFree.Quote.Add(cost.Sub(fee))
-		s.feePaid = s.feePaid.Add(fee)
+	longQty := s.positionQty
+	closeQty := minDecimal(qty, longQty)
+	if closeQty.Cmp(decimal.Zero) > 0 {
+		realized := price.Sub(s.positionEntry).Mul(closeQty)
+		s.walletQuote = s.walletQuote.Add(realized)
+		s.positionQty = s.positionQty.Sub(closeQty)
+	}
+	remain := qty.Sub(closeQty)
+	if s.positionQty.Cmp(decimal.Zero) == 0 {
+		s.positionEntry = decimal.Zero
+	}
+	if remain.Cmp(decimal.Zero) > 0 {
+		s.positionEntry = price
+		s.positionQty = s.positionQty.Sub(remain)
 	}
 }
 
-func (s *SimExchange) releaseLocked(ord *core.Order) {
-	switch ord.Side {
-	case core.Buy:
-		reserve := s.reservedBuyQuote(ord.Price, ord.Qty, s.makerFee)
-		s.quoteLocked = s.quoteLocked.Sub(reserve)
-		s.balanceFree.Quote = s.balanceFree.Quote.Add(reserve)
-	case core.Sell:
-		s.baseLocked = s.baseLocked.Sub(ord.Qty)
-		s.balanceFree.Base = s.balanceFree.Base.Add(ord.Qty)
+func (s *SimExchange) unrealizedPnL(markPrice decimal.Decimal) decimal.Decimal {
+	if markPrice.Cmp(decimal.Zero) <= 0 || s.positionQty.Cmp(decimal.Zero) == 0 {
+		return decimal.Zero
 	}
+	if s.positionQty.Cmp(decimal.Zero) > 0 {
+		return markPrice.Sub(s.positionEntry).Mul(s.positionQty)
+	}
+	return s.positionEntry.Sub(markPrice).Mul(s.positionQty.Abs())
 }
 
-func (s *SimExchange) reservedBuyQuote(price, qty, feeRate decimal.Decimal) decimal.Decimal {
-	cost := price.Mul(qty)
-	if feeRate.Cmp(decimal.Zero) <= 0 {
-		return cost
+func weightedPrice(p1, q1, p2, q2 decimal.Decimal) decimal.Decimal {
+	total := q1.Add(q2)
+	if total.Cmp(decimal.Zero) <= 0 {
+		return decimal.Zero
 	}
-	return cost.Mul(decimal.NewFromInt(1).Add(feeRate))
+	return p1.Mul(q1).Add(p2.Mul(q2)).Div(total)
+}
+
+func minDecimal(a, b decimal.Decimal) decimal.Decimal {
+	if a.Cmp(b) <= 0 {
+		return a
+	}
+	return b
 }

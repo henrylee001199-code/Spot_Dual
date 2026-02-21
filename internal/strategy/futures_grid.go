@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -14,16 +15,26 @@ import (
 	"grid-trading/internal/store"
 )
 
-const defaultRatioStep = "0.002"
-const defaultRatioQtyMultiple = "1"
+const defaultFuturesRatioStep = "0.002"
+const defaultFuturesRatioQtyMultiple = "1"
 
+type ContractMode string
+
+const (
+	ContractModeDual  ContractMode = "dual"
+	ContractModeLong  ContractMode = "long"
+	ContractModeShort ContractMode = "short"
+)
+
+// OrderExecutor keeps Balances for compatibility with existing fakes/tests,
+// even though this strategy does not depend on account asset buckets.
 type OrderExecutor interface {
 	PlaceOrder(ctx context.Context, order core.Order) (core.Order, error)
 	CancelOrder(ctx context.Context, symbol, orderID string) error
 	Balances(ctx context.Context) (core.Balance, error)
 }
 
-type SpotDual struct {
+type FuturesGrid struct {
 	Symbol           string
 	StopPrice        decimal.Decimal
 	Ratio            decimal.Decimal
@@ -33,6 +44,7 @@ type SpotDual struct {
 	Levels           int
 	Shift            int
 	Qty              decimal.Decimal
+	ContractMode     ContractMode
 
 	minQtyMultiple int64
 	rules          core.Rules
@@ -53,28 +65,44 @@ type SpotDual struct {
 	lastDownShiftAt    time.Time
 }
 
-func NewSpotDual(symbol string, stopPrice, ratio decimal.Decimal, levels, shift int, qty decimal.Decimal, minQtyMultiple int64, rules core.Rules, store store.Persister, executor OrderExecutor) *SpotDual {
-	return &SpotDual{
+func NewFuturesGrid(symbol string, mode ContractMode, stopPrice, ratio decimal.Decimal, levels, shift int, qty decimal.Decimal, minQtyMultiple int64, rules core.Rules, st store.Persister, executor OrderExecutor) *FuturesGrid {
+	return &FuturesGrid{
 		Symbol:           symbol,
 		StopPrice:        stopPrice,
 		Ratio:            ratio,
 		SellRatio:        ratio,
-		RatioStep:        decimal.RequireFromString(defaultRatioStep),
-		RatioQtyMultiple: decimal.RequireFromString(defaultRatioQtyMultiple),
+		RatioStep:        decimal.RequireFromString(defaultFuturesRatioStep),
+		RatioQtyMultiple: decimal.RequireFromString(defaultFuturesRatioQtyMultiple),
 		Levels:           levels,
 		Shift:            shift,
 		Qty:              qty,
+		ContractMode:     normalizeContractMode(mode),
 		minQtyMultiple:   minQtyMultiple,
 		rules:            rules,
 		executor:         executor,
 		openOrders:       make(map[string]core.Order),
-		store:            store,
+		store:            st,
 		ignoreFills:      make(map[string]struct{}),
 		baseBuyRatio:     ratio,
 	}
 }
 
-func (s *SpotDual) LoadState(state store.GridState) {
+func (s *FuturesGrid) mode() ContractMode {
+	s.ContractMode = normalizeContractMode(s.ContractMode)
+	return s.ContractMode
+}
+
+func normalizeContractMode(mode ContractMode) ContractMode {
+	m := ContractMode(strings.ToLower(strings.TrimSpace(string(mode))))
+	switch m {
+	case ContractModeLong, ContractModeShort:
+		return m
+	default:
+		return ContractModeDual
+	}
+}
+
+func (s *FuturesGrid) LoadState(state store.GridState) {
 	if state.Symbol != "" && state.Symbol != s.Symbol {
 		return
 	}
@@ -111,31 +139,38 @@ func (s *SpotDual) LoadState(state store.GridState) {
 	if !state.LastDownShiftAt.IsZero() {
 		s.lastDownShiftAt = state.LastDownShiftAt
 	}
+	if state.ContractMode != "" {
+		s.ContractMode = normalizeContractMode(ContractMode(state.ContractMode))
+	}
 }
 
-func (s *SpotDual) SetAlerter(alerter alert.Alerter) {
+func (s *FuturesGrid) SetAlerter(alerter alert.Alerter) {
 	s.alerter = alerter
 }
 
-func (s *SpotDual) SetSellRatio(ratio decimal.Decimal) {
+func (s *FuturesGrid) SetSellRatio(ratio decimal.Decimal) {
 	if ratio.Cmp(decimal.NewFromInt(1)) > 0 {
 		s.SellRatio = ratio
 	}
 }
 
-func (s *SpotDual) SetRatioStep(step decimal.Decimal) {
+func (s *FuturesGrid) SetRatioStep(step decimal.Decimal) {
 	if step.Cmp(decimal.Zero) >= 0 {
 		s.RatioStep = step
 	}
 }
 
-func (s *SpotDual) SetRatioQtyMultiple(v decimal.Decimal) {
+func (s *FuturesGrid) SetRatioQtyMultiple(v decimal.Decimal) {
 	if v.Cmp(decimal.Zero) > 0 {
 		s.RatioQtyMultiple = v
 	}
 }
 
-func (s *SpotDual) Init(ctx context.Context, price decimal.Decimal) error {
+func (s *FuturesGrid) SetContractMode(mode ContractMode) {
+	s.ContractMode = normalizeContractMode(mode)
+}
+
+func (s *FuturesGrid) Init(ctx context.Context, price decimal.Decimal) error {
 	if s.stopped {
 		return ErrStopped
 	}
@@ -163,61 +198,57 @@ func (s *SpotDual) Init(ctx context.Context, price decimal.Decimal) error {
 	if s.anchor.Cmp(decimal.Zero) <= 0 {
 		s.anchor = price
 	}
-	if s.maxLevel == 0 {
-		s.maxLevel = s.sellLevels()
-	}
-	if s.minLevel == 0 && s.maxLevel <= s.Levels {
-		s.minLevel = -s.Levels
-	}
-	if s.maxLevel < 1 {
-		return errors.New("shift_levels must be >= 1")
+	if err := s.initWindowBounds(); err != nil {
+		return err
 	}
 
-	orderQty := s.orderQty()
-	totalBase := orderQty.Mul(decimal.NewFromInt(int64(s.maxLevel)))
-	if totalBase.Cmp(decimal.Zero) > 0 {
-		need, err := s.baseBuyNeed(ctx, totalBase)
-		if err != nil {
-			s.alertImportant("bootstrap_failed", map[string]string{
-				"stage": "query_balance",
-				"err":   err.Error(),
-			})
-			_ = s.persistSnapshot()
-			return err
-		}
-		if need.Cmp(decimal.Zero) > 0 {
-			if err := s.placeMarketBuy(ctx, need); err != nil {
+	switch s.mode() {
+	case ContractModeLong:
+		for i := -1; i >= s.minLevel; i-- {
+			if err := s.placeLimit(ctx, core.Buy, i); err != nil {
 				s.alertImportant("bootstrap_failed", map[string]string{
-					"stage": "market_buy_base",
-					"qty":   need.String(),
+					"stage": "place_initial_long_buy",
+					"level": strconv.Itoa(i),
 					"err":   err.Error(),
 				})
 				_ = s.persistSnapshot()
 				return err
 			}
 		}
-	}
-
-	for i := 1; i <= s.maxLevel; i++ {
-		if err := s.placeLimit(ctx, core.Sell, i); err != nil {
-			s.alertImportant("bootstrap_failed", map[string]string{
-				"stage": "place_initial_sell",
-				"level": strconv.Itoa(i),
-				"err":   err.Error(),
-			})
-			_ = s.persistSnapshot()
-			return err
+	case ContractModeShort:
+		for i := 1; i <= s.maxLevel; i++ {
+			if err := s.placeLimit(ctx, core.Sell, i); err != nil {
+				s.alertImportant("bootstrap_failed", map[string]string{
+					"stage": "place_initial_short_sell",
+					"level": strconv.Itoa(i),
+					"err":   err.Error(),
+				})
+				_ = s.persistSnapshot()
+				return err
+			}
 		}
-	}
-	for i := -1; i >= s.minLevel; i-- {
-		if err := s.placeLimit(ctx, core.Buy, i); err != nil {
-			s.alertImportant("bootstrap_failed", map[string]string{
-				"stage": "place_initial_buy",
-				"level": strconv.Itoa(i),
-				"err":   err.Error(),
-			})
-			_ = s.persistSnapshot()
-			return err
+	default:
+		for i := 1; i <= s.maxLevel; i++ {
+			if err := s.placeLimit(ctx, core.Sell, i); err != nil {
+				s.alertImportant("bootstrap_failed", map[string]string{
+					"stage": "place_initial_sell",
+					"level": strconv.Itoa(i),
+					"err":   err.Error(),
+				})
+				_ = s.persistSnapshot()
+				return err
+			}
+		}
+		for i := -1; i >= s.minLevel; i-- {
+			if err := s.placeLimit(ctx, core.Buy, i); err != nil {
+				s.alertImportant("bootstrap_failed", map[string]string{
+					"stage": "place_initial_buy",
+					"level": strconv.Itoa(i),
+					"err":   err.Error(),
+				})
+				_ = s.persistSnapshot()
+				return err
+			}
 		}
 	}
 
@@ -232,46 +263,48 @@ func (s *SpotDual) Init(ctx context.Context, price decimal.Decimal) error {
 	return nil
 }
 
-func (s *SpotDual) baseBuyNeed(ctx context.Context, target decimal.Decimal) (decimal.Decimal, error) {
-	if target.Cmp(decimal.Zero) <= 0 {
-		return decimal.Zero, nil
+func (s *FuturesGrid) initWindowBounds() error {
+	switch s.mode() {
+	case ContractModeLong:
+		if s.minLevel == 0 {
+			s.minLevel = -s.Levels
+		}
+		if s.maxLevel == 0 {
+			s.maxLevel = 0
+		}
+		if s.minLevel > -1 {
+			return errors.New("levels must be >= 1 for long mode")
+		}
+	case ContractModeShort:
+		if s.maxLevel == 0 {
+			s.maxLevel = s.Levels
+		}
+		if s.minLevel == 0 {
+			s.minLevel = 0
+		}
+		if s.maxLevel < 1 {
+			return errors.New("levels must be >= 1 for short mode")
+		}
+	default:
+		if s.maxLevel == 0 {
+			s.maxLevel = s.Levels
+		}
+		if s.minLevel == 0 && s.maxLevel <= s.Levels {
+			s.minLevel = -s.Levels
+		}
+		if s.maxLevel < 1 {
+			return errors.New("levels must be >= 1 for dual mode")
+		}
 	}
-	bal, err := s.executor.Balances(ctx)
-	if err != nil {
-		return decimal.Zero, err
-	}
-	need := target.Sub(bal.Base)
-	if need.Cmp(decimal.Zero) <= 0 {
-		return decimal.Zero, nil
-	}
-	return need, nil
+	return nil
 }
 
-func (s *SpotDual) OnFill(ctx context.Context, trade core.Trade) error {
+func (s *FuturesGrid) OnFill(ctx context.Context, trade core.Trade) error {
 	if s.stopped {
 		return ErrStopped
 	}
 	if trade.Status == "" {
 		trade.Status = core.OrderFilled
-	}
-	if _, ok := s.ignoreFills[trade.OrderID]; ok {
-		if s.store != nil {
-			if err := s.store.AppendTrade(trade); err != nil {
-				s.alertImportant("state_persist_failed", map[string]string{
-					"stage": "append_trade",
-					"err":   err.Error(),
-				})
-				_ = s.persistSnapshot()
-				return err
-			}
-		}
-		if trade.Status == core.OrderFilled || trade.Status == core.OrderCanceled || trade.Status == core.OrderExpired || trade.Status == core.OrderRejected {
-			delete(s.ignoreFills, trade.OrderID)
-		}
-		if s.shouldStop(trade.Price) {
-			return s.stopNow(ctx)
-		}
-		return s.persistSnapshot()
 	}
 
 	ord, ok := s.openOrders[trade.OrderID]
@@ -279,15 +312,8 @@ func (s *SpotDual) OnFill(ctx context.Context, trade core.Trade) error {
 		if trade.Qty.Cmp(decimal.Zero) > 0 && trade.Qty.Cmp(ord.Qty) < 0 && trade.Status == core.OrderPartiallyFilled {
 			ord.Qty = ord.Qty.Sub(trade.Qty)
 			s.openOrders[trade.OrderID] = ord
-			if s.store != nil {
-				if err := s.store.AppendTrade(trade); err != nil {
-					s.alertImportant("state_persist_failed", map[string]string{
-						"stage": "append_trade",
-						"err":   err.Error(),
-					})
-					_ = s.persistSnapshot()
-					return err
-				}
+			if err := s.appendTrade(trade); err != nil {
+				return err
 			}
 			if s.shouldStop(trade.Price) {
 				return s.stopNow(ctx)
@@ -297,15 +323,8 @@ func (s *SpotDual) OnFill(ctx context.Context, trade core.Trade) error {
 		delete(s.openOrders, trade.OrderID)
 	}
 
-	if s.store != nil {
-		if err := s.store.AppendTrade(trade); err != nil {
-			s.alertImportant("state_persist_failed", map[string]string{
-				"stage": "append_trade",
-				"err":   err.Error(),
-			})
-			_ = s.persistSnapshot()
-			return err
-		}
+	if err := s.appendTrade(trade); err != nil {
+		return err
 	}
 	if s.shouldStop(trade.Price) {
 		return s.stopNow(ctx)
@@ -327,35 +346,104 @@ func (s *SpotDual) OnFill(ctx context.Context, trade core.Trade) error {
 		}
 	}
 
+	if err := s.applyFillTransition(ctx, side, idx, trade); err != nil {
+		_ = s.persistSnapshot()
+		return err
+	}
+	return s.persistSnapshot()
+}
+
+func (s *FuturesGrid) appendTrade(trade core.Trade) error {
+	if s.store == nil {
+		return nil
+	}
+	if err := s.store.AppendTrade(trade); err != nil {
+		s.alertImportant("state_persist_failed", map[string]string{
+			"stage": "append_trade",
+			"err":   err.Error(),
+		})
+		_ = s.persistSnapshot()
+		return err
+	}
+	return nil
+}
+
+func (s *FuturesGrid) applyFillTransition(ctx context.Context, side core.Side, idx int, trade core.Trade) error {
+	switch s.mode() {
+	case ContractModeLong:
+		return s.onFillLong(ctx, side, idx, trade)
+	case ContractModeShort:
+		return s.onFillShort(ctx, side, idx, trade)
+	default:
+		return s.onFillDual(ctx, side, idx, trade)
+	}
+}
+
+func (s *FuturesGrid) onFillDual(ctx context.Context, side core.Side, idx int, trade core.Trade) error {
 	switch side {
 	case core.Sell:
 		if err := s.placeLimit(ctx, core.Buy, idx-1); err != nil {
-			_ = s.persistSnapshot()
 			return err
 		}
 		if idx == s.maxLevel {
 			if err := s.shiftUp(ctx, idx, trade.Price, trade.Time); err != nil {
-				_ = s.persistSnapshot()
 				return err
 			}
 		}
 	case core.Buy:
 		if err := s.placeLimit(ctx, core.Sell, idx+1); err != nil {
-			_ = s.persistSnapshot()
 			return err
 		}
 		if idx == s.minLevel {
 			s.onDownShiftTriggered(trade.Price, trade.Time)
 			if err := s.extendDown(ctx); err != nil {
-				_ = s.persistSnapshot()
 				return err
 			}
 		}
 	}
-	return s.persistSnapshot()
+	return nil
 }
 
-func (s *SpotDual) OnTick(ctx context.Context, price decimal.Decimal, _ time.Time) error {
+func (s *FuturesGrid) onFillLong(ctx context.Context, side core.Side, idx int, trade core.Trade) error {
+	switch side {
+	case core.Buy:
+		if err := s.placeLimit(ctx, core.Sell, idx+1); err != nil {
+			return err
+		}
+		if idx == s.minLevel {
+			s.onDownShiftTriggered(trade.Price, trade.Time)
+			if err := s.extendDown(ctx); err != nil {
+				return err
+			}
+		}
+	case core.Sell:
+		if err := s.placeLimit(ctx, core.Buy, idx-1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *FuturesGrid) onFillShort(ctx context.Context, side core.Side, idx int, _ core.Trade) error {
+	switch side {
+	case core.Sell:
+		if err := s.placeLimit(ctx, core.Buy, idx-1); err != nil {
+			return err
+		}
+		if idx == s.maxLevel {
+			if err := s.extendUp(ctx); err != nil {
+				return err
+			}
+		}
+	case core.Buy:
+		if err := s.placeLimit(ctx, core.Sell, idx+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *FuturesGrid) OnTick(ctx context.Context, price decimal.Decimal, _ time.Time) error {
 	if s.stopped {
 		return ErrStopped
 	}
@@ -371,16 +459,10 @@ func (s *SpotDual) OnTick(ctx context.Context, price decimal.Decimal, _ time.Tim
 	if s.SellRatio.Cmp(decimal.NewFromInt(1)) <= 0 {
 		s.SellRatio = s.Ratio
 	}
-	if s.maxLevel == 0 {
-		s.maxLevel = s.sellLevels()
-	}
-	if s.minLevel == 0 && s.maxLevel <= s.Levels {
-		s.minLevel = -s.Levels
-	}
-	return nil
+	return s.initWindowBounds()
 }
 
-func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrders []core.Order) error {
+func (s *FuturesGrid) Reconcile(ctx context.Context, price decimal.Decimal, openOrders []core.Order) error {
 	if s.stopped {
 		return s.reconcileStopped(ctx, openOrders)
 	}
@@ -394,33 +476,52 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 	if s.SellRatio.Cmp(decimal.NewFromInt(1)) <= 0 {
 		s.SellRatio = s.Ratio
 	}
-	if s.maxLevel == 0 {
-		s.maxLevel = s.sellLevels()
-	}
-	if s.minLevel == 0 && s.maxLevel <= s.Levels {
-		s.minLevel = -s.Levels
+	if err := s.initWindowBounds(); err != nil {
+		return err
 	}
 	s.initialized = false
 
 	s.openOrders = make(map[string]core.Order)
-	levelBuckets := make(map[int][]core.Order)
+	type reconcileBucketKey struct {
+		Level        int
+		Side         core.Side
+		PositionSide core.PositionSide
+	}
+	levelBuckets := make(map[reconcileBucketKey][]core.Order)
 	for _, ord := range openOrders {
 		idx, ok := s.indexForPrice(ord.Price)
 		if !ok {
 			continue
 		}
 		ord.GridIndex = idx
-		levelBuckets[idx] = append(levelBuckets[idx], ord)
+		if ord.PositionSide == "" {
+			ord.PositionSide, _ = s.orderFlags(ord.Side, idx)
+		}
+		key := reconcileBucketKey{
+			Level:        idx,
+			Side:         ord.Side,
+			PositionSide: ord.PositionSide,
+		}
+		levelBuckets[key] = append(levelBuckets[key], ord)
 	}
 
-	levels := make([]int, 0, len(levelBuckets))
-	for idx := range levelBuckets {
-		levels = append(levels, idx)
+	keys := make([]reconcileBucketKey, 0, len(levelBuckets))
+	for k := range levelBuckets {
+		keys = append(keys, k)
 	}
-	sort.Ints(levels)
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].Level != keys[j].Level {
+			return keys[i].Level < keys[j].Level
+		}
+		if keys[i].Side != keys[j].Side {
+			return keys[i].Side < keys[j].Side
+		}
+		return keys[i].PositionSide < keys[j].PositionSide
+	})
 
-	for _, idx := range levels {
-		ordersAtLevel := levelBuckets[idx]
+	for _, key := range keys {
+		idx := key.Level
+		ordersAtLevel := levelBuckets[key]
 		keepIdx := primaryOrderIndex(ordersAtLevel)
 		keep := ordersAtLevel[keepIdx]
 		if keep.ID != "" {
@@ -435,6 +536,7 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 				s.alertImportant("reconcile_duplicate_order_cancel_failed", map[string]string{
 					"order_id": idOrPlaceholder(ord.ID),
 					"side":     string(ord.Side),
+					"position": string(ord.PositionSide),
 					"price":    ord.Price.String(),
 					"qty":      ord.Qty.String(),
 					"level":    strconv.Itoa(idx),
@@ -446,6 +548,7 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 			s.alertImportant("reconcile_duplicate_order_canceled", map[string]string{
 				"order_id": idOrPlaceholder(ord.ID),
 				"side":     string(ord.Side),
+				"position": string(ord.PositionSide),
 				"price":    ord.Price.String(),
 				"qty":      ord.Qty.String(),
 				"level":    strconv.Itoa(idx),
@@ -454,124 +557,66 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 		}
 	}
 
-	lowestBuy := 0
-	for _, ord := range s.openOrders {
-		if ord.Side != core.Buy {
-			continue
-		}
-		if lowestBuy == 0 || ord.GridIndex < lowestBuy {
-			lowestBuy = ord.GridIndex
-		}
-	}
-	if lowestBuy != 0 && lowestBuy < s.minLevel {
-		s.minLevel = lowestBuy
-	}
-
-	for i := 1; i <= s.maxLevel; i++ {
-		if err := s.cancelConflictingOrderAtLevel(ctx, i, core.Sell); err != nil {
-			s.alertImportant("reconcile_conflict_order_cancel_failed", map[string]string{
-				"side":  string(core.Sell),
-				"level": strconv.Itoa(i),
-				"err":   err.Error(),
-			})
-			_ = s.persistSnapshot()
-			return err
-		}
-	}
-	for i := -1; i >= s.minLevel; i-- {
-		if err := s.cancelConflictingOrderAtLevel(ctx, i, core.Buy); err != nil {
-			s.alertImportant("reconcile_conflict_order_cancel_failed", map[string]string{
-				"side":  string(core.Buy),
-				"level": strconv.Itoa(i),
-				"err":   err.Error(),
-			})
-			_ = s.persistSnapshot()
-			return err
-		}
-	}
-
-	missingSellLevels := make([]int, 0)
-	for i := 1; i <= s.maxLevel; i++ {
-		if !s.hasOrderLevelWithSide(core.Sell, i) {
-			missingSellLevels = append(missingSellLevels, i)
-		}
-	}
-	if len(missingSellLevels) > 0 {
-		buyQty, err := s.shiftBuyNeed(ctx, len(missingSellLevels))
-		if err != nil {
-			s.alertImportant("reconcile_base_buy_need_failed", map[string]string{
-				"missing_sell_levels": strconv.Itoa(len(missingSellLevels)),
-				"err":                 err.Error(),
-			})
-			_ = s.persistSnapshot()
-			return err
-		}
-		if buyQty.Cmp(decimal.Zero) > 0 {
-			if err := s.placeMarketBuy(ctx, buyQty); err != nil {
-				s.alertImportant("reconcile_base_buy_failed", map[string]string{
-					"missing_sell_levels": strconv.Itoa(len(missingSellLevels)),
-					"qty":                 buyQty.String(),
-					"err":                 err.Error(),
+	switch s.mode() {
+	case ContractModeLong:
+		for i := -1; i >= s.minLevel; i-- {
+			if s.hasOrderLevelWithSide(core.Buy, i) {
+				continue
+			}
+			if err := s.placeLimit(ctx, core.Buy, i); err != nil {
+				s.alertImportant("reconcile_gap_order_failed", map[string]string{
+					"side":  string(core.Buy),
+					"level": strconv.Itoa(i),
+					"err":   err.Error(),
 				})
 				_ = s.persistSnapshot()
 				return err
 			}
 		}
-	}
-
-	for i := 1; i <= s.maxLevel; i++ {
-		if s.hasOrderLevelWithSide(core.Sell, i) {
-			continue
+	case ContractModeShort:
+		for i := 1; i <= s.maxLevel; i++ {
+			if s.hasOrderLevelWithSide(core.Sell, i) {
+				continue
+			}
+			if err := s.placeLimit(ctx, core.Sell, i); err != nil {
+				s.alertImportant("reconcile_gap_order_failed", map[string]string{
+					"side":  string(core.Sell),
+					"level": strconv.Itoa(i),
+					"err":   err.Error(),
+				})
+				_ = s.persistSnapshot()
+				return err
+			}
 		}
-		if err := s.placeLimit(ctx, core.Sell, i); err != nil {
-			s.alertImportant("reconcile_gap_order_failed", map[string]string{
-				"side":  string(core.Sell),
-				"level": strconv.Itoa(i),
-				"err":   err.Error(),
-			})
-			_ = s.persistSnapshot()
-			return err
+	default:
+		for i := 1; i <= s.maxLevel; i++ {
+			if s.hasOrderLevelWithSide(core.Sell, i) {
+				continue
+			}
+			if err := s.placeLimit(ctx, core.Sell, i); err != nil {
+				s.alertImportant("reconcile_gap_order_failed", map[string]string{
+					"side":  string(core.Sell),
+					"level": strconv.Itoa(i),
+					"err":   err.Error(),
+				})
+				_ = s.persistSnapshot()
+				return err
+			}
 		}
-	}
-	for i := -1; i >= s.minLevel; i-- {
-		if s.hasOrderLevelWithSide(core.Buy, i) {
-			continue
+		for i := -1; i >= s.minLevel; i-- {
+			if s.hasOrderLevelWithSide(core.Buy, i) {
+				continue
+			}
+			if err := s.placeLimit(ctx, core.Buy, i); err != nil {
+				s.alertImportant("reconcile_gap_order_failed", map[string]string{
+					"side":  string(core.Buy),
+					"level": strconv.Itoa(i),
+					"err":   err.Error(),
+				})
+				_ = s.persistSnapshot()
+				return err
+			}
 		}
-		if err := s.placeLimit(ctx, core.Buy, i); err != nil {
-			s.alertImportant("reconcile_gap_order_failed", map[string]string{
-				"side":  string(core.Buy),
-				"level": strconv.Itoa(i),
-				"err":   err.Error(),
-			})
-			_ = s.persistSnapshot()
-			return err
-		}
-	}
-
-	missingSell := 0
-	for i := 1; i <= s.maxLevel; i++ {
-		if !s.hasOrderLevelWithSide(core.Sell, i) {
-			missingSell++
-		}
-	}
-	missingBuy := 0
-	for i := -1; i >= s.minLevel; i-- {
-		if !s.hasOrderLevelWithSide(core.Buy, i) {
-			missingBuy++
-		}
-	}
-	if missingSell > 0 || missingBuy > 0 {
-		s.alertImportant("reconcile_grid_incomplete", map[string]string{
-			"missing_sell_levels": strconv.Itoa(missingSell),
-			"missing_buy_levels":  strconv.Itoa(missingBuy),
-		})
-		if err := s.persistSnapshot(); err != nil {
-			s.alertImportant("reconcile_persist_failed", map[string]string{
-				"err": err.Error(),
-			})
-			return err
-		}
-		return errors.New("reconcile incomplete grid")
 	}
 
 	s.initialized = true
@@ -584,12 +629,12 @@ func (s *SpotDual) Reconcile(ctx context.Context, price decimal.Decimal, openOrd
 	return nil
 }
 
-func (s *SpotDual) reconcileStopped(ctx context.Context, openOrders []core.Order) error {
+func (s *FuturesGrid) reconcileStopped(ctx context.Context, openOrders []core.Order) error {
 	s.replaceOpenOrdersFromExchange(openOrders)
 	return s.stopNow(ctx)
 }
 
-func (s *SpotDual) Reset() {
+func (s *FuturesGrid) Reset() {
 	s.openOrders = make(map[string]core.Order)
 	s.initialized = false
 	s.stopped = false
@@ -601,7 +646,7 @@ func (s *SpotDual) Reset() {
 	_ = s.persistSnapshot()
 }
 
-func (s *SpotDual) orderQty() decimal.Decimal {
+func (s *FuturesGrid) orderQty() decimal.Decimal {
 	qty := s.Qty
 	if s.minQtyMultiple > 0 && s.rules.MinQty.Cmp(decimal.Zero) > 0 {
 		minQty := s.rules.MinQty.Mul(decimal.NewFromInt(s.minQtyMultiple))
@@ -612,7 +657,7 @@ func (s *SpotDual) orderQty() decimal.Decimal {
 	return qty
 }
 
-func (s *SpotDual) effectiveRatios() (decimal.Decimal, decimal.Decimal) {
+func (s *FuturesGrid) effectiveRatios() (decimal.Decimal, decimal.Decimal) {
 	one := decimal.NewFromInt(1)
 	buy := s.Ratio
 	if buy.Cmp(one) <= 0 {
@@ -631,7 +676,7 @@ func (s *SpotDual) effectiveRatios() (decimal.Decimal, decimal.Decimal) {
 	return buy, sell
 }
 
-func (s *SpotDual) priceForLevel(idx int) decimal.Decimal {
+func (s *FuturesGrid) priceForLevel(idx int) decimal.Decimal {
 	if s.anchor.Cmp(decimal.Zero) <= 0 {
 		return decimal.Zero
 	}
@@ -649,7 +694,7 @@ func (s *SpotDual) priceForLevel(idx int) decimal.Decimal {
 	return price
 }
 
-func (s *SpotDual) indexForPrice(price decimal.Decimal) (int, bool) {
+func (s *FuturesGrid) indexForPrice(price decimal.Decimal) (int, bool) {
 	if s.anchor.Cmp(decimal.Zero) <= 0 {
 		return 0, false
 	}
@@ -660,12 +705,6 @@ func (s *SpotDual) indexForPrice(price decimal.Decimal) (int, bool) {
 
 	minIdx := s.minLevel
 	maxIdx := s.maxLevel
-	if maxIdx == 0 {
-		maxIdx = s.sellLevels()
-	}
-	if minIdx == 0 && maxIdx <= s.Levels {
-		minIdx = -s.Levels
-	}
 	for idx := minIdx; idx <= maxIdx; idx++ {
 		if s.priceForLevel(idx).Cmp(target) == 0 {
 			return idx, true
@@ -674,15 +713,16 @@ func (s *SpotDual) indexForPrice(price decimal.Decimal) (int, bool) {
 	return 0, false
 }
 
-func (s *SpotDual) placeLimit(ctx context.Context, side core.Side, idx int) error {
+func (s *FuturesGrid) placeLimit(ctx context.Context, side core.Side, idx int) error {
 	return s.placeLimitWithQtyMultiple(ctx, side, idx, decimal.NewFromInt(1))
 }
 
-func (s *SpotDual) placeLimitWithQtyMultiple(ctx context.Context, side core.Side, idx int, qtyMultiple decimal.Decimal) error {
-	if idx > s.maxLevel {
+func (s *FuturesGrid) placeLimitWithQtyMultiple(ctx context.Context, side core.Side, idx int, qtyMultiple decimal.Decimal) error {
+	if !s.allowLevel(side, idx) {
 		return nil
 	}
-	if s.hasOrderLevel(idx) {
+	positionSide, reduceOnly := s.orderFlags(side, idx)
+	if s.hasOrderLevelWithSide(side, idx) {
 		return nil
 	}
 	price := s.priceForLevel(idx)
@@ -697,13 +737,15 @@ func (s *SpotDual) placeLimitWithQtyMultiple(ctx context.Context, side core.Side
 		return nil
 	}
 	order := core.Order{
-		Symbol:    s.Symbol,
-		Side:      side,
-		Type:      core.Limit,
-		Price:     price,
-		Qty:       qty,
-		GridIndex: idx,
-		CreatedAt: time.Now().UTC(),
+		Symbol:       s.Symbol,
+		Side:         side,
+		Type:         core.Limit,
+		PositionSide: positionSide,
+		ReduceOnly:   reduceOnly,
+		Price:        price,
+		Qty:          qty,
+		GridIndex:    idx,
+		CreatedAt:    time.Now().UTC(),
 	}
 	norm, err := core.NormalizeOrder(order, s.rules)
 	if err != nil {
@@ -727,44 +769,63 @@ func (s *SpotDual) placeLimitWithQtyMultiple(ctx context.Context, side core.Side
 	if placed.CreatedAt.IsZero() {
 		placed.CreatedAt = order.CreatedAt
 	}
+	if placed.PositionSide == "" {
+		placed.PositionSide = order.PositionSide
+	}
+	if !placed.ReduceOnly {
+		placed.ReduceOnly = order.ReduceOnly
+	}
 	placed.GridIndex = idx
 	s.openOrders[placed.ID] = placed
 	return nil
 }
 
-func (s *SpotDual) placeMarketBuy(ctx context.Context, qty decimal.Decimal) error {
-	if qty.Cmp(decimal.Zero) <= 0 {
-		return nil
+func (s *FuturesGrid) allowLevel(side core.Side, idx int) bool {
+	switch s.mode() {
+	case ContractModeLong:
+		if side == core.Buy {
+			return idx >= s.minLevel && idx <= -1
+		}
+		return idx >= s.minLevel+1 && idx <= 0
+	case ContractModeShort:
+		if side == core.Sell {
+			return idx >= 1 && idx <= s.maxLevel
+		}
+		return idx >= 0 && idx <= s.maxLevel-1
+	default:
+		return idx <= s.maxLevel
 	}
-	order := core.Order{
-		Symbol:    s.Symbol,
-		Side:      core.Buy,
-		Type:      core.Market,
-		Qty:       qty,
-		Price:     s.anchor,
-		CreatedAt: time.Now().UTC(),
-	}
-	norm, err := core.NormalizeOrder(order, s.rules)
-	if err != nil {
-		return err
-	}
-	order = norm
-	placed, err := s.executor.PlaceOrder(ctx, order)
-	if err != nil {
-		return err
-	}
-	if placed.ID != "" {
-		s.ignoreFills[placed.ID] = struct{}{}
-	}
-	return nil
 }
 
-func (s *SpotDual) extendDown(ctx context.Context) error {
-	if s.Levels <= 0 {
+func (s *FuturesGrid) orderFlags(side core.Side, idx int) (core.PositionSide, bool) {
+	switch s.mode() {
+	case ContractModeLong:
+		return core.PositionSideBoth, side == core.Sell
+	case ContractModeShort:
+		return core.PositionSideBoth, side == core.Buy
+	default:
+		switch {
+		case side == core.Buy && idx <= -1:
+			return core.PositionSideLong, false
+		case side == core.Sell && idx >= 1:
+			return core.PositionSideShort, false
+		case side == core.Buy && idx >= 0:
+			return core.PositionSideShort, true
+		case side == core.Sell && idx <= 0:
+			return core.PositionSideLong, true
+		default:
+			return core.PositionSideBoth, false
+		}
+	}
+}
+
+func (s *FuturesGrid) extendDown(ctx context.Context) error {
+	shift := s.shiftLevels()
+	if shift <= 0 {
 		return nil
 	}
 	oldMin := s.minLevel
-	s.minLevel = s.minLevel - s.Levels
+	s.minLevel = s.minLevel - shift
 	qtyMultiple := s.downShiftQtyMultiple()
 	for i := oldMin - 1; i >= s.minLevel; i-- {
 		if err := s.placeLimitWithQtyMultiple(ctx, core.Buy, i, qtyMultiple); err != nil {
@@ -774,7 +835,22 @@ func (s *SpotDual) extendDown(ctx context.Context) error {
 	return nil
 }
 
-func (s *SpotDual) shiftUp(ctx context.Context, filledLevel int, triggerPrice decimal.Decimal, at time.Time) error {
+func (s *FuturesGrid) extendUp(ctx context.Context) error {
+	shift := s.shiftLevels()
+	if shift <= 0 {
+		return nil
+	}
+	oldMax := s.maxLevel
+	s.maxLevel = s.maxLevel + shift
+	for i := oldMax + 1; i <= s.maxLevel; i++ {
+		if err := s.placeLimit(ctx, core.Sell, i); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *FuturesGrid) shiftUp(ctx context.Context, filledLevel int, triggerPrice decimal.Decimal, at time.Time) error {
 	shift := s.shiftLevels()
 	if shift < 1 {
 		return nil
@@ -790,18 +866,6 @@ func (s *SpotDual) shiftUp(ctx context.Context, filledLevel int, triggerPrice de
 	if err := s.cancelBuyRange(ctx, oldMin, oldMin+shift-1); err != nil {
 		return err
 	}
-	if err := s.placeLimit(ctx, core.Buy, oldMax); err != nil {
-		return err
-	}
-	buyQty, err := s.shiftBuyNeed(ctx, shift)
-	if err != nil {
-		return err
-	}
-	if buyQty.Cmp(decimal.Zero) > 0 {
-		if err := s.placeMarketBuy(ctx, buyQty); err != nil {
-			return err
-		}
-	}
 	s.minLevel = newMin
 	s.maxLevel = newMax
 	for i := oldMax + 1; i <= newMax; i++ {
@@ -812,7 +876,7 @@ func (s *SpotDual) shiftUp(ctx context.Context, filledLevel int, triggerPrice de
 	return nil
 }
 
-func (s *SpotDual) shouldStop(price decimal.Decimal) bool {
+func (s *FuturesGrid) shouldStop(price decimal.Decimal) bool {
 	if s.StopPrice.Cmp(decimal.Zero) <= 0 {
 		return false
 	}
@@ -822,9 +886,9 @@ func (s *SpotDual) shouldStop(price decimal.Decimal) bool {
 	return price.Cmp(s.StopPrice) > 0
 }
 
-func (s *SpotDual) stopNow(ctx context.Context) error {
+func (s *FuturesGrid) stopNow(ctx context.Context) error {
 	justStopped := !s.stopped
-	s.cancelAllOpenBuyOrders(ctx)
+	s.cancelAllOpenOrders(ctx)
 	s.stopped = true
 	s.initialized = false
 	if justStopped {
@@ -836,13 +900,13 @@ func (s *SpotDual) stopNow(ctx context.Context) error {
 	if err := s.persistSnapshot(); err != nil {
 		return err
 	}
-	if s.hasOpenBuyOrders() {
+	if len(s.openOrders) > 0 {
 		return nil
 	}
 	return ErrStopped
 }
 
-func (s *SpotDual) replaceOpenOrdersFromExchange(openOrders []core.Order) {
+func (s *FuturesGrid) replaceOpenOrdersFromExchange(openOrders []core.Order) {
 	next := make(map[string]core.Order, len(openOrders))
 	for _, ord := range openOrders {
 		if ord.ID == "" {
@@ -856,13 +920,10 @@ func (s *SpotDual) replaceOpenOrdersFromExchange(openOrders []core.Order) {
 	s.openOrders = next
 }
 
-func (s *SpotDual) cancelAllOpenBuyOrders(ctx context.Context) {
+func (s *FuturesGrid) cancelAllOpenOrders(ctx context.Context) {
 	for id, ord := range s.openOrders {
 		if id == "" {
 			delete(s.openOrders, id)
-			continue
-		}
-		if ord.Side != core.Buy {
 			continue
 		}
 		if err := s.executor.CancelOrder(ctx, s.Symbol, id); err != nil {
@@ -879,16 +940,7 @@ func (s *SpotDual) cancelAllOpenBuyOrders(ctx context.Context) {
 	}
 }
 
-func (s *SpotDual) hasOpenBuyOrders() bool {
-	for _, ord := range s.openOrders {
-		if ord.Side == core.Buy {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *SpotDual) cancelBuyRange(ctx context.Context, from, to int) error {
+func (s *FuturesGrid) cancelBuyRange(ctx context.Context, from, to int) error {
 	var firstErr error
 	for id, ord := range s.openOrders {
 		if ord.Side != core.Buy {
@@ -915,7 +967,7 @@ func (s *SpotDual) cancelBuyRange(ctx context.Context, from, to int) error {
 	return firstErr
 }
 
-func (s *SpotDual) cancelConflictingOrderAtLevel(ctx context.Context, idx int, expectedSide core.Side) error {
+func (s *FuturesGrid) cancelConflictingOrderAtLevel(ctx context.Context, idx int, expectedSide core.Side) error {
 	for id, ord := range s.openOrders {
 		if ord.GridIndex != idx {
 			continue
@@ -950,7 +1002,7 @@ func (s *SpotDual) cancelConflictingOrderAtLevel(ctx context.Context, idx int, e
 	return nil
 }
 
-func (s *SpotDual) shiftLevels() int {
+func (s *FuturesGrid) shiftLevels() int {
 	if s.Shift > 0 {
 		return s.Shift
 	}
@@ -960,18 +1012,18 @@ func (s *SpotDual) shiftLevels() int {
 	return s.Levels / 2
 }
 
-func (s *SpotDual) downShiftRatioStep() decimal.Decimal {
+func (s *FuturesGrid) downShiftRatioStep() decimal.Decimal {
 	return s.RatioStep
 }
 
-func (s *SpotDual) downShiftQtyMultiple() decimal.Decimal {
+func (s *FuturesGrid) downShiftQtyMultiple() decimal.Decimal {
 	if s.RatioQtyMultiple.Cmp(decimal.Zero) > 0 {
 		return s.RatioQtyMultiple
 	}
-	return decimal.RequireFromString(defaultRatioQtyMultiple)
+	return decimal.RequireFromString(defaultFuturesRatioQtyMultiple)
 }
 
-func (s *SpotDual) onDownShiftTriggered(triggerPrice decimal.Decimal, at time.Time) {
+func (s *FuturesGrid) onDownShiftTriggered(triggerPrice decimal.Decimal, at time.Time) {
 	if triggerPrice.Cmp(decimal.Zero) <= 0 {
 		return
 	}
@@ -997,7 +1049,7 @@ func (s *SpotDual) onDownShiftTriggered(triggerPrice decimal.Decimal, at time.Ti
 	s.lastDownShiftAt = at
 }
 
-func (s *SpotDual) restoreBuyRatioOnShiftUp(price decimal.Decimal, at time.Time) {
+func (s *FuturesGrid) restoreBuyRatioOnShiftUp(price decimal.Decimal, at time.Time) {
 	if s.baseBuyRatio.Cmp(decimal.NewFromInt(1)) <= 0 {
 		return
 	}
@@ -1021,63 +1073,7 @@ func (s *SpotDual) restoreBuyRatioOnShiftUp(price decimal.Decimal, at time.Time)
 	})
 }
 
-func (s *SpotDual) sellLevels() int {
-	n := s.shiftLevels()
-	if n < 1 {
-		return 1
-	}
-	return n
-}
-
-func (s *SpotDual) shiftBuyNeed(ctx context.Context, shift int) (decimal.Decimal, error) {
-	if shift < 1 {
-		return decimal.Zero, nil
-	}
-	required := s.orderQty().Mul(decimal.NewFromInt(int64(shift)))
-	if required.Cmp(decimal.Zero) <= 0 {
-		return decimal.Zero, nil
-	}
-	bal, err := s.executor.Balances(ctx)
-	if err != nil {
-		return decimal.Zero, err
-	}
-	freeBase := bal.Base.Sub(s.lockedSellBase())
-	if freeBase.Cmp(decimal.Zero) < 0 {
-		freeBase = decimal.Zero
-	}
-	need := required.Sub(freeBase)
-	if need.Cmp(decimal.Zero) <= 0 {
-		return decimal.Zero, nil
-	}
-	return s.roundQtyUp(need), nil
-}
-
-func (s *SpotDual) lockedSellBase() decimal.Decimal {
-	total := decimal.Zero
-	for _, ord := range s.openOrders {
-		if ord.Side != core.Sell {
-			continue
-		}
-		total = total.Add(ord.Qty)
-	}
-	return total
-}
-
-func (s *SpotDual) roundQtyUp(qty decimal.Decimal) decimal.Decimal {
-	if qty.Cmp(decimal.Zero) <= 0 {
-		return decimal.Zero
-	}
-	out := qty
-	if s.rules.QtyStep.Cmp(decimal.Zero) > 0 {
-		out = out.Div(s.rules.QtyStep).Ceil().Mul(s.rules.QtyStep)
-	}
-	if s.rules.MinQty.Cmp(decimal.Zero) > 0 && out.Cmp(s.rules.MinQty) < 0 {
-		out = s.rules.MinQty
-	}
-	return out
-}
-
-func (s *SpotDual) hasOrderLevel(idx int) bool {
+func (s *FuturesGrid) hasOrderLevel(idx int) bool {
 	for _, ord := range s.openOrders {
 		if ord.GridIndex == idx {
 			return true
@@ -1086,7 +1082,7 @@ func (s *SpotDual) hasOrderLevel(idx int) bool {
 	return false
 }
 
-func (s *SpotDual) hasOrderLevelWithSide(side core.Side, idx int) bool {
+func (s *FuturesGrid) hasOrderLevelWithSide(side core.Side, idx int) bool {
 	for _, ord := range s.openOrders {
 		if ord.GridIndex == idx && ord.Side == side {
 			return true
@@ -1148,7 +1144,7 @@ func isInsufficientBalanceError(err error) bool {
 	return errors.Is(err, core.ErrInsufficientBalance)
 }
 
-func (s *SpotDual) persistSnapshot() error {
+func (s *FuturesGrid) persistSnapshot() error {
 	if s.store == nil {
 		return nil
 	}
@@ -1171,17 +1167,18 @@ func (s *SpotDual) persistSnapshot() error {
 	return nil
 }
 
-func (s *SpotDual) alertImportant(event string, fields map[string]string) {
+func (s *FuturesGrid) alertImportant(event string, fields map[string]string) {
 	if s.alerter == nil {
 		return
 	}
 	s.alerter.Important(event, fields)
 }
 
-func (s *SpotDual) snapshotState() store.GridState {
+func (s *FuturesGrid) snapshotState() store.GridState {
 	state := store.GridState{
-		Strategy:           "spot_dual",
+		Strategy:           "futures_grid",
 		Symbol:             s.Symbol,
+		ContractMode:       string(s.mode()),
 		Anchor:             s.anchor,
 		StopPrice:          s.StopPrice,
 		Ratio:              s.Ratio,
@@ -1204,7 +1201,7 @@ func (s *SpotDual) snapshotState() store.GridState {
 	return state
 }
 
-func (s *SpotDual) snapshotOrders() []core.Order {
+func (s *FuturesGrid) snapshotOrders() []core.Order {
 	orders := make([]core.Order, 0, len(s.openOrders))
 	for _, ord := range s.openOrders {
 		orders = append(orders, ord)

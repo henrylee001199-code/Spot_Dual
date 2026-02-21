@@ -14,9 +14,10 @@ func ratioStepPtr(v string) *config.Decimal {
 	return &config.Decimal{Decimal: decimal.RequireFromString(v)}
 }
 
-func TestApplySpotDualTuningKeepsDefaultRatioStepWhenUnset(t *testing.T) {
-	strat := strategy.NewSpotDual(
+func TestApplyFuturesGridTuningKeepsDefaultRatioStepWhenUnset(t *testing.T) {
+	strat := strategy.NewFuturesGrid(
 		"BTCUSDT",
+		strategy.ContractModeDual,
 		decimal.Zero,
 		decimal.RequireFromString("1.01"),
 		20,
@@ -35,7 +36,7 @@ func TestApplySpotDualTuningKeepsDefaultRatioStepWhenUnset(t *testing.T) {
 		},
 	}
 
-	applySpotDualTuning(strat, cfg)
+	applyFuturesGridTuning(strat, cfg)
 
 	if !strat.RatioStep.Equal(want) {
 		t.Fatalf("ratio_step changed unexpectedly: got=%s want=%s", strat.RatioStep.String(), want.String())
@@ -45,9 +46,10 @@ func TestApplySpotDualTuningKeepsDefaultRatioStepWhenUnset(t *testing.T) {
 	}
 }
 
-func TestApplySpotDualTuningAllowsZeroRatioStep(t *testing.T) {
-	strat := strategy.NewSpotDual(
+func TestApplyFuturesGridTuningAllowsZeroRatioStep(t *testing.T) {
+	strat := strategy.NewFuturesGrid(
 		"BTCUSDT",
+		strategy.ContractModeDual,
 		decimal.Zero,
 		decimal.RequireFromString("1.01"),
 		20,
@@ -65,16 +67,17 @@ func TestApplySpotDualTuningAllowsZeroRatioStep(t *testing.T) {
 		},
 	}
 
-	applySpotDualTuning(strat, cfg)
+	applyFuturesGridTuning(strat, cfg)
 
 	if !strat.RatioStep.Equal(decimal.Zero) {
 		t.Fatalf("ratio_step = %s, want 0", strat.RatioStep.String())
 	}
 }
 
-func TestApplySpotDualTuningSetsRatioQtyMultiple(t *testing.T) {
-	strat := strategy.NewSpotDual(
+func TestApplyFuturesGridTuningSetsRatioQtyMultiple(t *testing.T) {
+	strat := strategy.NewFuturesGrid(
 		"BTCUSDT",
+		strategy.ContractModeDual,
 		decimal.Zero,
 		decimal.RequireFromString("1.01"),
 		20,
@@ -92,7 +95,7 @@ func TestApplySpotDualTuningSetsRatioQtyMultiple(t *testing.T) {
 		},
 	}
 
-	applySpotDualTuning(strat, cfg)
+	applyFuturesGridTuning(strat, cfg)
 
 	if !strat.RatioQtyMultiple.Equal(decimal.RequireFromString("1.2")) {
 		t.Fatalf("ratio_qty_multiple = %s, want 1.2", strat.RatioQtyMultiple.String())

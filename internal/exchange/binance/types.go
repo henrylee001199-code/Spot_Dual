@@ -23,10 +23,17 @@ func (e APIError) Error() string {
 }
 
 type orderResponse struct {
-	Symbol  string `json:"symbol"`
-	OrderID int64  `json:"orderId"`
-	Price   string `json:"price"`
-	OrigQty string `json:"origQty"`
+	Symbol          string `json:"symbol"`
+	OrderID         int64  `json:"orderId"`
+	ClientOrderID   string `json:"clientOrderId"`
+	Price           string `json:"price"`
+	OrigQty         string `json:"origQty"`
+	Status          string `json:"status"`
+	PositionSide    string `json:"positionSide"`
+	ReduceOnly      bool   `json:"reduceOnly"`
+	UpdateTime      int64  `json:"updateTime"`
+	ExecutedQty     string `json:"executedQty"`
+	CumulativeQuote string `json:"cumQuote"`
 }
 
 type orderQueryResponse struct {
@@ -37,21 +44,29 @@ type orderQueryResponse struct {
 	OrigQty            string `json:"origQty"`
 	ExecutedQty        string `json:"executedQty"`
 	CumulativeQuoteQty string `json:"cummulativeQuoteQty"`
+	CumulativeQuote    string `json:"cumQuote"`
 	Status             string `json:"status"`
 	Side               string `json:"side"`
 	Type               string `json:"type"`
+	PositionSide       string `json:"positionSide"`
+	ReduceOnly         bool   `json:"reduceOnly"`
 	Time               int64  `json:"time"`
 	UpdateTime         int64  `json:"updateTime"`
 }
 
 type openOrderResponse struct {
-	Symbol      string `json:"symbol"`
-	OrderID     int64  `json:"orderId"`
-	Price       string `json:"price"`
-	OrigQty     string `json:"origQty"`
-	ExecutedQty string `json:"executedQty"`
-	Side        string `json:"side"`
-	Type        string `json:"type"`
+	Symbol        string `json:"symbol"`
+	OrderID       int64  `json:"orderId"`
+	ClientOrderID string `json:"clientOrderId"`
+	Price         string `json:"price"`
+	OrigQty       string `json:"origQty"`
+	ExecutedQty   string `json:"executedQty"`
+	Side          string `json:"side"`
+	Type          string `json:"type"`
+	Status        string `json:"status"`
+	PositionSide  string `json:"positionSide"`
+	ReduceOnly    bool   `json:"reduceOnly"`
+	UpdateTime    int64  `json:"updateTime"`
 }
 
 type tickerPriceResponse struct {
@@ -59,12 +74,14 @@ type tickerPriceResponse struct {
 	Price  string `json:"price"`
 }
 
-type accountResponse struct {
-	Balances []struct {
-		Asset  string `json:"asset"`
-		Free   string `json:"free"`
-		Locked string `json:"locked"`
-	} `json:"balances"`
+type futuresBalanceResponse []struct {
+	Asset            string `json:"asset"`
+	Balance          string `json:"balance"`
+	AvailableBalance string `json:"availableBalance"`
+}
+
+type listenKeyResponse struct {
+	ListenKey string `json:"listenKey"`
 }
 
 type exchangeInfoResponse struct {

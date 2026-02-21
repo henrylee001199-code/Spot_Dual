@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -19,115 +20,82 @@ type UserStream struct {
 	client    *Client
 	conn      *websocket.Conn
 	keepalive time.Duration
+	listenKey string
 }
 
-type executionReport struct {
+type futuresOrderTradeUpdate struct {
 	EventType       string `json:"e"`
 	EventTime       int64  `json:"E"`
-	Symbol          string `json:"s"`
-	OrderID         int64  `json:"i"`
-	Side            string `json:"S"`
-	ExecutionType   string `json:"x"`
-	OrderStatus     string `json:"X"`
-	OrderPrice      string `json:"p"`
-	OrderQty        string `json:"q"`
-	LastExecPrice   string `json:"L"`
-	LastExecQty     string `json:"l"`
-	CumulativeQty   string `json:"z"`
 	TransactionTime int64  `json:"T"`
-	TradeID         int64  `json:"t"`
+	Order           struct {
+		Symbol        string `json:"s"`
+		OrderID       int64  `json:"i"`
+		Side          string `json:"S"`
+		ExecutionType string `json:"x"`
+		OrderStatus   string `json:"X"`
+		OrderPrice    string `json:"p"`
+		AvgPrice      string `json:"ap"`
+		LastExecPrice string `json:"L"`
+		LastExecQty   string `json:"l"`
+		TradeTime     int64  `json:"T"`
+		TradeID       int64  `json:"t"`
+		PositionSide  string `json:"ps"`
+		ReduceOnly    bool   `json:"R"`
+	} `json:"o"`
 }
 
 func (c *Client) NewUserStream(ctx context.Context, keepalive time.Duration) (*UserStream, error) {
 	if c.wsBaseURL == "" {
 		return nil, errors.New("ws base url required")
 	}
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, c.wsBaseURL, nil)
+	listenKey, err := c.createListenKey(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if c.userStreamAuth == "session" {
-		if err := c.sessionLogon(ctx, conn); err != nil {
-			_ = conn.Close()
-			return nil, err
-		}
-		if _, err := sendWSRequest(ctx, conn, "userDataStream.subscribe", nil); err != nil {
-			_ = conn.Close()
-			return nil, err
-		}
-	} else {
-		params, err := c.userStreamParams()
-		if err != nil {
-			_ = conn.Close()
-			return nil, err
-		}
-		if _, err := sendWSRequest(ctx, conn, "userDataStream.subscribe.signature", params); err != nil {
-			_ = conn.Close()
-			return nil, err
-		}
-	}
-	return &UserStream{client: c, conn: conn, keepalive: keepalive}, nil
-}
-
-func (c *Client) userStreamParams() (map[string]interface{}, error) {
-	if c.apiKey == "" || c.apiSecret == "" {
-		return nil, errors.New("api_key/api_secret required")
-	}
-	if c.userStreamAuth != "signature" {
-		return nil, fmt.Errorf("unsupported user stream auth: %s", c.userStreamAuth)
-	}
-	ts := time.Now().UnixMilli()
-	values := url.Values{}
-	values.Set("apiKey", c.apiKey)
-	values.Set("timestamp", strconv.FormatInt(ts, 10))
-	if c.recvWindow > 0 {
-		values.Set("recvWindow", strconv.FormatInt(c.recvWindow.Milliseconds(), 10))
-	}
-	signature := sign(c.apiSecret, values.Encode())
-	params := map[string]interface{}{
-		"apiKey":    c.apiKey,
-		"timestamp": ts,
-		"signature": signature,
-	}
-	if c.recvWindow > 0 {
-		params["recvWindow"] = c.recvWindow.Milliseconds()
-	}
-	return params, nil
-}
-
-func (c *Client) sessionLogon(ctx context.Context, conn *websocket.Conn) error {
-	params, err := c.sessionLogonParams()
+	wsURL := c.userStreamWSURL(listenKey)
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
-		return err
+		_ = c.closeListenKey(context.Background(), listenKey)
+		return nil, err
 	}
-	_, err = sendWSRequest(ctx, conn, "session.logon", params)
+	return &UserStream{client: c, conn: conn, keepalive: keepalive, listenKey: listenKey}, nil
+}
+
+func (c *Client) userStreamWSURL(listenKey string) string {
+	base := strings.TrimRight(c.wsBaseURL, "/")
+	if strings.HasSuffix(base, "/ws") {
+		return base + "/" + listenKey
+	}
+	return base + "/ws/" + listenKey
+}
+
+func (c *Client) createListenKey(ctx context.Context) (string, error) {
+	body, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/listenKey", url.Values{}, AuthAPIKey)
+	if err != nil {
+		return "", err
+	}
+	var resp listenKeyResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(resp.ListenKey) == "" {
+		return "", errors.New("empty listen key")
+	}
+	return strings.TrimSpace(resp.ListenKey), nil
+}
+
+func (c *Client) keepaliveListenKey(ctx context.Context, listenKey string) error {
+	params := url.Values{}
+	params.Set("listenKey", listenKey)
+	_, err := c.doRequest(ctx, http.MethodPut, "/fapi/v1/listenKey", params, AuthAPIKey)
 	return err
 }
 
-func (c *Client) sessionLogonParams() (map[string]interface{}, error) {
-	if c.apiKey == "" {
-		return nil, errors.New("api_key required")
-	}
-	if c.wsEd25519Key == nil {
-		return nil, errors.New("ed25519 key not loaded")
-	}
-	ts := time.Now().UnixMilli()
-	values := url.Values{}
-	values.Set("apiKey", c.apiKey)
-	values.Set("timestamp", strconv.FormatInt(ts, 10))
-	if c.recvWindow > 0 {
-		values.Set("recvWindow", strconv.FormatInt(c.recvWindow.Milliseconds(), 10))
-	}
-	signature := signEd25519(values.Encode(), c.wsEd25519Key)
-	params := map[string]interface{}{
-		"apiKey":    c.apiKey,
-		"timestamp": ts,
-		"signature": signature,
-	}
-	if c.recvWindow > 0 {
-		params["recvWindow"] = c.recvWindow.Milliseconds()
-	}
-	return params, nil
+func (c *Client) closeListenKey(ctx context.Context, listenKey string) error {
+	params := url.Values{}
+	params.Set("listenKey", listenKey)
+	_, err := c.doRequest(ctx, http.MethodDelete, "/fapi/v1/listenKey", params, AuthAPIKey)
+	return err
 }
 
 func (u *UserStream) Trades(ctx context.Context, symbol string) (<-chan core.Trade, <-chan error) {
@@ -145,7 +113,7 @@ func (u *UserStream) Trades(ctx context.Context, symbol string) (<-chan core.Tra
 		}
 	}
 
-	readTimeout := 45 * time.Second
+	readTimeout := 90 * time.Second
 	if u.keepalive > 0 {
 		readTimeout = u.keepalive * 3
 		if readTimeout < 30*time.Second {
@@ -160,6 +128,11 @@ func (u *UserStream) Trades(ctx context.Context, symbol string) (<-chan core.Tra
 		defer close(done)
 		defer close(trades)
 		defer u.conn.Close()
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = u.client.closeListenKey(closeCtx, u.listenKey)
+		}()
 
 		for {
 			_ = u.conn.SetReadDeadline(time.Now().Add(readTimeout))
@@ -174,37 +147,41 @@ func (u *UserStream) Trades(ctx context.Context, symbol string) (<-chan core.Tra
 			if isWSResponse(data) {
 				continue
 			}
-			var msg executionReport
+
+			var msg futuresOrderTradeUpdate
 			if err := json.Unmarshal(data, &msg); err != nil {
 				continue
 			}
-			if msg.EventType != "executionReport" {
+			if msg.EventType != "ORDER_TRADE_UPDATE" {
 				continue
 			}
-			if symbol != "" && msg.Symbol != symbol {
+			if symbol != "" && msg.Order.Symbol != symbol {
 				continue
 			}
-			if msg.ExecutionType != "TRADE" {
+			if msg.Order.ExecutionType != "TRADE" {
 				continue
 			}
-			qty, err := decimal.NewFromString(msg.LastExecQty)
+			qty, err := decimal.NewFromString(msg.Order.LastExecQty)
 			if err != nil {
 				continue
 			}
 			if qty.Cmp(decimal.Zero) <= 0 {
 				continue
 			}
-			price, err := decimal.NewFromString(msg.LastExecPrice)
-			if err != nil {
-				price, err = decimal.NewFromString(msg.OrderPrice)
-				if err != nil {
-					continue
+			price, err := decimal.NewFromString(msg.Order.LastExecPrice)
+			if err != nil || price.Cmp(decimal.Zero) <= 0 {
+				price, err = decimal.NewFromString(msg.Order.AvgPrice)
+				if err != nil || price.Cmp(decimal.Zero) <= 0 {
+					price, err = decimal.NewFromString(msg.Order.OrderPrice)
+					if err != nil || price.Cmp(decimal.Zero) <= 0 {
+						continue
+					}
 				}
 			}
-			if price.Cmp(decimal.Zero) <= 0 {
-				continue
+			ts := msg.Order.TradeTime
+			if ts == 0 {
+				ts = msg.TransactionTime
 			}
-			ts := msg.TransactionTime
 			if ts == 0 {
 				ts = msg.EventTime
 			}
@@ -213,18 +190,20 @@ func (u *UserStream) Trades(ctx context.Context, symbol string) (<-chan core.Tra
 				continue
 			}
 			tradeID := ""
-			if msg.TradeID > 0 {
-				tradeID = strconv.FormatInt(msg.TradeID, 10)
+			if msg.Order.TradeID > 0 {
+				tradeID = strconv.FormatInt(msg.Order.TradeID, 10)
 			}
 			trade := core.Trade{
-				OrderID: strconv.FormatInt(msg.OrderID, 10),
-				TradeID: tradeID,
-				Symbol:  msg.Symbol,
-				Side:    core.Side(msg.Side),
-				Price:   price,
-				Qty:     qty,
-				Status:  core.OrderStatus(msg.OrderStatus),
-				Time:    time.UnixMilli(ts),
+				OrderID:      strconv.FormatInt(msg.Order.OrderID, 10),
+				TradeID:      tradeID,
+				Symbol:       msg.Order.Symbol,
+				Side:         core.Side(msg.Order.Side),
+				PositionSide: core.PositionSide(msg.Order.PositionSide),
+				ReduceOnly:   msg.Order.ReduceOnly,
+				Price:        price,
+				Qty:          qty,
+				Status:       core.OrderStatus(msg.Order.OrderStatus),
+				Time:         time.UnixMilli(ts),
 			}
 			select {
 			case trades <- trade:
@@ -249,6 +228,14 @@ func (u *UserStream) Trades(ctx context.Context, symbol string) (<-chan core.Tra
 			for {
 				select {
 				case <-ticker.C:
+					keepaliveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					err := u.client.keepaliveListenKey(keepaliveCtx, u.listenKey)
+					cancel()
+					if err != nil {
+						reportErr(err)
+						_ = u.conn.Close()
+						return
+					}
 					if err := u.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); err != nil {
 						reportErr(err)
 						_ = u.conn.Close()

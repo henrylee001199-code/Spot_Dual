@@ -89,8 +89,20 @@ func main() {
 			PriceTick:   cfg.Backtest.Rules.PriceTick.Decimal,
 			QtyStep:     cfg.Backtest.Rules.QtyStep.Decimal,
 		}
-		strat := strategy.NewSpotDual(cfg.Symbol, cfg.Grid.StopPrice.Decimal, cfg.Grid.Ratio.Decimal, cfg.Grid.Levels, cfg.Grid.ShiftLevels, cfg.Grid.Qty.Decimal, cfg.Grid.MinQtyMultiple, rules, nil, ex)
-		applySpotDualTuning(strat, cfg)
+		strat := strategy.NewFuturesGrid(
+			cfg.Symbol,
+			strategy.ContractMode(cfg.Grid.ContractMode),
+			cfg.Grid.StopPrice.Decimal,
+			cfg.Grid.Ratio.Decimal,
+			cfg.Grid.Levels,
+			cfg.Grid.ShiftLevels,
+			cfg.Grid.Qty.Decimal,
+			cfg.Grid.MinQtyMultiple,
+			rules,
+			nil,
+			ex,
+		)
+		applyFuturesGridTuning(strat, cfg)
 		runner := engine.BacktestRunner{Exchange: ex, Feed: feed, Strategy: strat}
 		result, err := runner.Run(ctx)
 		if err != nil {
@@ -127,6 +139,15 @@ func main() {
 		}
 		defer client.Close()
 		client.SetAlerter(alerts)
+		if err := client.ConfigureFutures(
+			ctx,
+			cfg.Symbol,
+			string(cfg.Exchange.PositionMode),
+			string(cfg.Exchange.MarginType),
+			cfg.Exchange.Leverage,
+		); err != nil {
+			fatal(err.Error())
+		}
 		rules, err := client.GetRules(ctx, cfg.Symbol)
 		if err != nil {
 			fatal(err.Error())
@@ -143,8 +164,20 @@ func main() {
 		)
 		breaker.SetAlerter(alerts)
 		exec := safety.NewGuardedExecutor(client, breaker)
-		strat := strategy.NewSpotDual(cfg.Symbol, cfg.Grid.StopPrice.Decimal, cfg.Grid.Ratio.Decimal, cfg.Grid.Levels, cfg.Grid.ShiftLevels, cfg.Grid.Qty.Decimal, cfg.Grid.MinQtyMultiple, rules, st, exec)
-		applySpotDualTuning(strat, cfg)
+		strat := strategy.NewFuturesGrid(
+			cfg.Symbol,
+			strategy.ContractMode(cfg.Grid.ContractMode),
+			cfg.Grid.StopPrice.Decimal,
+			cfg.Grid.Ratio.Decimal,
+			cfg.Grid.Levels,
+			cfg.Grid.ShiftLevels,
+			cfg.Grid.Qty.Decimal,
+			cfg.Grid.MinQtyMultiple,
+			rules,
+			st,
+			exec,
+		)
+		applyFuturesGridTuning(strat, cfg)
 		strat.SetAlerter(alerts)
 		if st != nil {
 			if state, ok, err := st.LoadGridState(); err != nil {
@@ -199,10 +232,11 @@ func buildAlertManager(cfg config.Config) *alert.Manager {
 	})
 }
 
-func applySpotDualTuning(strat *strategy.SpotDual, cfg config.Config) {
+func applyFuturesGridTuning(strat *strategy.FuturesGrid, cfg config.Config) {
 	if strat == nil {
 		return
 	}
+	strat.SetContractMode(strategy.ContractMode(cfg.Grid.ContractMode))
 	strat.SetSellRatio(cfg.Grid.SellRatio.Decimal)
 	if cfg.Grid.RatioStep != nil {
 		strat.SetRatioStep(cfg.Grid.RatioStep.Decimal)

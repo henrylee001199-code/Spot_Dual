@@ -148,7 +148,7 @@ func (r *BacktestRunner) Run(ctx context.Context) (BacktestResult, error) {
 	result.FinalBalance = bal
 	result.MarketBuyCount, result.MarketBuyQty = r.Exchange.MarketBuyStats()
 	if result.EndPrice.Cmp(decimal.Zero) > 0 {
-		result.EndEquityQuote = bal.Quote.Add(bal.Base.Mul(result.EndPrice))
+		result.EndEquityQuote = r.Exchange.Snapshot(result.EndPrice).EquityQuote
 	}
 	result.MaxDrawdownPct = maxDrawdown.Mul(decimal.NewFromInt(100))
 	result.MaxDrawdownQuote = maxDrawdownQuote

@@ -650,14 +650,16 @@ func tradeFromOrder(status binance.OrderQuery, fallback core.Order) core.Trade {
 		tradeID = "reconcile-" + order.ID
 	}
 	return core.Trade{
-		OrderID: order.ID,
-		TradeID: tradeID,
-		Symbol:  order.Symbol,
-		Side:    order.Side,
-		Price:   price,
-		Qty:     qty,
-		Status:  order.Status,
-		Time:    ts,
+		OrderID:      order.ID,
+		TradeID:      tradeID,
+		Symbol:       order.Symbol,
+		Side:         order.Side,
+		PositionSide: order.PositionSide,
+		ReduceOnly:   order.ReduceOnly,
+		Price:        price,
+		Qty:          qty,
+		Status:       order.Status,
+		Time:         ts,
 	}
 }
 

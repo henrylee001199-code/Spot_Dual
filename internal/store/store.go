@@ -21,6 +21,7 @@ import (
 type GridState struct {
 	Strategy           string          `json:"strategy"`
 	Symbol             string          `json:"symbol"`
+	ContractMode       string          `json:"contract_mode,omitempty"`
 	SnapshotID         string          `json:"snapshot_id,omitempty"`
 	Anchor             decimal.Decimal `json:"anchor"`
 	Low                decimal.Decimal `json:"low"`

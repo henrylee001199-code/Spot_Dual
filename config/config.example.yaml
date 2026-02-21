@@ -3,19 +3,20 @@ symbol: BTCUSDT
 instance_id: bot1 # used in state path and clientOrderId prefix
 
 grid:
+  contract_mode: dual # dual | long | short
   stop_price: "0" # stop strategy when market price > stop_price (0 means disabled)
   ratio: "1.012" # buy-side geometric spacing ratio, must be > 1
   ratio_step: "0.002" # buy-ratio defense increment on each down-shift trigger (0 disables increment, omit to use default 0.002)
   ratio_qty_multiple: "1.2" # during down-shift extension, new buy order qty = qty * ratio_qty_multiple
   sell_ratio: "1.012" # sell-side geometric spacing ratio, must be > 1
-  levels: 20 # active buy levels below anchor
-  shift_levels: 10 # active sell levels above anchor; also used as shift window size
+  levels: 20 # initial grid levels per side (dual) / per-direction side (long-short)
+  shift_levels: 10 # up/down shift step size
   mode: geometric # only geometric is supported
   qty: "0.001" # order qty before rule rounding
   min_qty_multiple: 1 # final qty floor = min_qty * min_qty_multiple
 
 state:
-  dir: "state" # state/{mode}/{symbol}/{instance_id}, includes state/open_orders/runtime_status
+  dir: "state_futures" # state_futures/{mode}/{symbol}/{instance_id}, includes state/open_orders/runtime_status
   lock_takeover: true # try taking over stale .instance.lock when previous process crashed
   lock_stale_sec: 600 # stale threshold for lock file age fallback checks
 
@@ -56,13 +57,13 @@ backtest:
 exchange:
   api_key: "YOUR_TESTNET_API_KEY"
   api_secret: "YOUR_TESTNET_API_SECRET"
-  # Current grid-trading repo uses SPOT endpoints.
-  # If you run a futures branch, switch these to fapi endpoints.
-  rest_base_url: "https://testnet.binance.vision"
-  ws_base_url: "wss://ws-api.testnet.binance.vision/ws-api/v3"
-  user_stream_auth: signature # signature | session
-  ws_ed25519_private_key_path: "" # required only when user_stream_auth=session
+  # USDⓈ-M Futures endpoints
+  rest_base_url: "https://testnet.binancefuture.com"
+  ws_base_url: "wss://stream.binancefuture.com"
+  position_mode: hedge # hedge | oneway (dual mode requires hedge)
+  margin_type: cross # cross | isolated
+  leverage: 3 # 1..125
   recv_window_ms: 5000
   http_timeout_sec: 15
   user_stream_keepalive_sec: 30 # user-stream ws ping/read heartbeat interval
-  order_ws_keepalive_sec: 30 # ws-api ping interval
+  order_ws_keepalive_sec: 30 # order channel keepalive interval

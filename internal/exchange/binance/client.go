@@ -2,7 +2,6 @@ package binance
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -40,8 +39,6 @@ type Client struct {
 	symbol            string
 	clientOrderPrefix string
 	userStreamAuth    string
-	wsEd25519KeyPath  string
-	wsEd25519Key      ed25519.PrivateKey
 	orderMu           sync.Mutex
 	orderConn         *orderWSConn
 	orderWSKeepalive  time.Duration
@@ -63,7 +60,6 @@ type Options struct {
 	Symbol              string
 	ClientOrderPrefix   string
 	UserStreamAuth      string
-	WSEd25519KeyPath    string
 	RecvWindowMs        int64
 	HTTPTimeoutSec      int64
 	OrderWSKeepaliveSec int64
@@ -80,21 +76,11 @@ func NewClient(cfg config.ExchangeConfig, symbol, instanceID string) (*Client, e
 		WSBaseURL:           cfg.WSBaseURL,
 		Symbol:              symbol,
 		ClientOrderPrefix:   instanceID,
-		UserStreamAuth:      string(cfg.UserStreamAuth),
-		WSEd25519KeyPath:    cfg.WSEd25519KeyPath,
 		RecvWindowMs:        cfg.RecvWindowMs,
 		HTTPTimeoutSec:      cfg.HTTPTimeoutSec,
 		OrderWSKeepaliveSec: cfg.OrderWSKeepaliveSec,
 	}
-	client := NewClientWithOptions(opts)
-	if client.userStreamAuth == "session" {
-		key, err := loadEd25519PrivateKey(client.wsEd25519KeyPath)
-		if err != nil {
-			return nil, err
-		}
-		client.wsEd25519Key = key
-	}
-	return client, nil
+	return NewClientWithOptions(opts), nil
 }
 
 func NewClientWithOptions(opts Options) *Client {
@@ -116,7 +102,6 @@ func NewClientWithOptions(opts Options) *Client {
 		symbol:            opts.Symbol,
 		clientOrderPrefix: normalizeClientOrderPrefix(opts.ClientOrderPrefix),
 		userStreamAuth:    userStreamAuth,
-		wsEd25519KeyPath:  opts.WSEd25519KeyPath,
 		recvWindow:        recvWindow,
 		httpClient:        &http.Client{Timeout: timeout},
 		symbolCache:       make(map[string]symbolInfo),
@@ -207,18 +192,98 @@ func (c *Client) GetRules(ctx context.Context, symbol string) (core.Rules, error
 	return info.rules, nil
 }
 
+func (c *Client) ConfigureFutures(ctx context.Context, symbol, positionMode, marginType string, leverage int) error {
+	if err := c.SetPositionMode(ctx, positionMode); err != nil {
+		return fmt.Errorf("set position mode: %w", err)
+	}
+	if symbol == "" {
+		return nil
+	}
+	if err := c.SetMarginType(ctx, symbol, marginType); err != nil {
+		return fmt.Errorf("set margin type: %w", err)
+	}
+	if err := c.SetLeverage(ctx, symbol, leverage); err != nil {
+		return fmt.Errorf("set leverage: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) SetPositionMode(ctx context.Context, mode string) error {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		return nil
+	}
+	dual := false
+	switch mode {
+	case "hedge":
+		dual = true
+	case "oneway", "one_way":
+		dual = false
+	default:
+		return fmt.Errorf("unsupported position mode: %s", mode)
+	}
+	params := url.Values{}
+	params.Set("dualSidePosition", strconv.FormatBool(dual))
+	_, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/positionSide/dual", params, AuthSigned)
+	if err != nil && IsAPIErrorCode(err, -4059) {
+		return nil
+	}
+	return err
+}
+
+func (c *Client) SetMarginType(ctx context.Context, symbol, marginType string) error {
+	if symbol == "" {
+		return errors.New("symbol required")
+	}
+	mt := strings.ToLower(strings.TrimSpace(marginType))
+	if mt == "" {
+		return nil
+	}
+	apiMarginType := ""
+	switch mt {
+	case "cross":
+		apiMarginType = "CROSSED"
+	case "isolated":
+		apiMarginType = "ISOLATED"
+	default:
+		return fmt.Errorf("unsupported margin type: %s", marginType)
+	}
+	params := url.Values{}
+	params.Set("symbol", symbol)
+	params.Set("marginType", apiMarginType)
+	_, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/marginType", params, AuthSigned)
+	if err != nil && IsAPIErrorCode(err, -4046) {
+		return nil
+	}
+	return err
+}
+
+func (c *Client) SetLeverage(ctx context.Context, symbol string, leverage int) error {
+	if symbol == "" {
+		return errors.New("symbol required")
+	}
+	if leverage < 1 {
+		return errors.New("leverage must be >= 1")
+	}
+	params := url.Values{}
+	params.Set("symbol", symbol)
+	params.Set("leverage", strconv.Itoa(leverage))
+	_, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/leverage", params, AuthSigned)
+	return err
+}
+
 func (c *Client) CancelOrder(ctx context.Context, symbol, orderID string) error {
 	params := url.Values{}
 	params.Set("symbol", symbol)
 	params.Set("orderId", orderID)
-	_, err := c.doRequest(ctx, http.MethodDelete, "/api/v3/order", params, AuthSigned)
+	_, err := c.doRequest(ctx, http.MethodDelete, "/fapi/v1/order", params, AuthSigned)
 	return err
 }
 
 func (c *Client) OpenOrders(ctx context.Context, symbol string) ([]core.Order, error) {
 	params := url.Values{}
 	params.Set("symbol", symbol)
-	body, err := c.doRequest(ctx, http.MethodGet, "/api/v3/openOrders", params, AuthSigned)
+	body, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/openOrders", params, AuthSigned)
 	if err != nil {
 		return nil, err
 	}
@@ -235,14 +300,22 @@ func (c *Client) OpenOrders(ctx context.Context, symbol string) ([]core.Order, e
 		if executedQty.Cmp(decimal.Zero) > 0 && origQty.Cmp(executedQty) > 0 {
 			qty = origQty.Sub(executedQty)
 		}
+		createdAt := time.Time{}
+		if ord.UpdateTime > 0 {
+			createdAt = time.UnixMilli(ord.UpdateTime)
+		}
 		orders = append(orders, core.Order{
-			ID:     strconv.FormatInt(ord.OrderID, 10),
-			Symbol: ord.Symbol,
-			Side:   core.Side(ord.Side),
-			Type:   core.OrderType(ord.Type),
-			Price:  price,
-			Qty:    qty,
-			Status: core.OrderNew,
+			ID:           strconv.FormatInt(ord.OrderID, 10),
+			ClientID:     ord.ClientOrderID,
+			Symbol:       ord.Symbol,
+			Side:         core.Side(ord.Side),
+			Type:         core.OrderType(ord.Type),
+			PositionSide: core.PositionSide(ord.PositionSide),
+			ReduceOnly:   ord.ReduceOnly,
+			Price:        price,
+			Qty:          qty,
+			Status:       core.OrderStatus(ord.Status),
+			CreatedAt:    createdAt,
 		})
 	}
 	return orders, nil
@@ -269,7 +342,7 @@ func (c *Client) QueryOrder(ctx context.Context, symbol, orderID, clientID strin
 	} else {
 		params.Set("origClientOrderId", clientID)
 	}
-	body, err := c.doRequest(ctx, http.MethodGet, "/api/v3/order", params, AuthSigned)
+	body, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/order", params, AuthSigned)
 	if err != nil {
 		return OrderQuery{}, err
 	}
@@ -280,17 +353,22 @@ func (c *Client) QueryOrder(ctx context.Context, symbol, orderID, clientID strin
 	price, _ := decimal.NewFromString(resp.Price)
 	qty, _ := decimal.NewFromString(resp.OrigQty)
 	executedQty, _ := decimal.NewFromString(resp.ExecutedQty)
-	cumQuote, _ := decimal.NewFromString(resp.CumulativeQuoteQty)
+	cumQuote, _ := decimal.NewFromString(resp.CumulativeQuote)
+	if cumQuote.Cmp(decimal.Zero) <= 0 {
+		cumQuote, _ = decimal.NewFromString(resp.CumulativeQuoteQty)
+	}
 
 	order := core.Order{
-		ID:       strconv.FormatInt(resp.OrderID, 10),
-		ClientID: resp.ClientOrderID,
-		Symbol:   resp.Symbol,
-		Side:     core.Side(resp.Side),
-		Type:     core.OrderType(resp.Type),
-		Price:    price,
-		Qty:      qty,
-		Status:   core.OrderStatus(resp.Status),
+		ID:           strconv.FormatInt(resp.OrderID, 10),
+		ClientID:     resp.ClientOrderID,
+		Symbol:       resp.Symbol,
+		Side:         core.Side(resp.Side),
+		Type:         core.OrderType(resp.Type),
+		PositionSide: core.PositionSide(resp.PositionSide),
+		ReduceOnly:   resp.ReduceOnly,
+		Price:        price,
+		Qty:          qty,
+		Status:       core.OrderStatus(resp.Status),
 	}
 	if resp.Time > 0 {
 		order.CreatedAt = time.UnixMilli(resp.Time)
@@ -315,26 +393,27 @@ func (c *Client) Balances(ctx context.Context) (core.Balance, error) {
 	if err != nil {
 		return core.Balance{}, err
 	}
-	body, err := c.doRequest(ctx, http.MethodGet, "/api/v3/account", url.Values{}, AuthSigned)
+	body, err := c.doRequest(ctx, http.MethodGet, "/fapi/v2/balance", url.Values{}, AuthSigned)
 	if err != nil {
 		return core.Balance{}, err
 	}
-	var resp accountResponse
+	var resp futuresBalanceResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return core.Balance{}, err
 	}
 	bal := core.Balance{Base: decimal.Zero, Quote: decimal.Zero}
-	for _, b := range resp.Balances {
-		if b.Asset == info.baseAsset {
-			free, _ := decimal.NewFromString(b.Free)
-			locked, _ := decimal.NewFromString(b.Locked)
-			bal.Base = free.Add(locked)
+	for _, b := range resp {
+		if b.Asset != info.quoteAsset {
+			continue
 		}
-		if b.Asset == info.quoteAsset {
-			free, _ := decimal.NewFromString(b.Free)
-			locked, _ := decimal.NewFromString(b.Locked)
-			bal.Quote = free.Add(locked)
+		total, _ := decimal.NewFromString(b.Balance)
+		available, _ := decimal.NewFromString(b.AvailableBalance)
+		if total.Cmp(decimal.Zero) > 0 {
+			bal.Quote = total
+		} else {
+			bal.Quote = available
 		}
+		break
 	}
 	return bal, nil
 }
@@ -342,7 +421,7 @@ func (c *Client) Balances(ctx context.Context) (core.Balance, error) {
 func (c *Client) TickerPrice(ctx context.Context, symbol string) (decimal.Decimal, error) {
 	params := url.Values{}
 	params.Set("symbol", symbol)
-	body, err := c.doRequest(ctx, http.MethodGet, "/api/v3/ticker/price", params, AuthNone)
+	body, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/ticker/price", params, AuthNone)
 	if err != nil {
 		return decimal.Zero, err
 	}
@@ -435,7 +514,7 @@ func (c *Client) getSymbolInfo(ctx context.Context, symbol string) (symbolInfo, 
 	if symbol != "" {
 		params.Set("symbol", symbol)
 	}
-	body, err := c.doRequest(ctx, http.MethodGet, "/api/v3/exchangeInfo", params, AuthNone)
+	body, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/exchangeInfo", params, AuthNone)
 	if err != nil {
 		return symbolInfo{}, err
 	}

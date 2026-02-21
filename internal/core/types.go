@@ -12,9 +12,17 @@ type OrderType string
 
 type OrderStatus string
 
+type PositionSide string
+
 const (
 	Buy  Side = "BUY"
 	Sell Side = "SELL"
+)
+
+const (
+	PositionSideBoth  PositionSide = "BOTH"
+	PositionSideLong  PositionSide = "LONG"
+	PositionSideShort PositionSide = "SHORT"
 )
 
 const (
@@ -32,28 +40,32 @@ const (
 )
 
 type Order struct {
-	ID        string
-	ClientID  string
-	Symbol    string
-	Side      Side
-	Type      OrderType
-	Price     decimal.Decimal
-	Qty       decimal.Decimal
-	Status    OrderStatus
-	CreatedAt time.Time
-	FilledAt  *time.Time
-	GridIndex int
+	ID           string
+	ClientID     string
+	Symbol       string
+	Side         Side
+	Type         OrderType
+	PositionSide PositionSide
+	ReduceOnly   bool
+	Price        decimal.Decimal
+	Qty          decimal.Decimal
+	Status       OrderStatus
+	CreatedAt    time.Time
+	FilledAt     *time.Time
+	GridIndex    int
 }
 
 type Trade struct {
-	OrderID string
-	TradeID string
-	Symbol  string
-	Side    Side
-	Price   decimal.Decimal
-	Qty     decimal.Decimal
-	Status  OrderStatus
-	Time    time.Time
+	OrderID      string
+	TradeID      string
+	Symbol       string
+	Side         Side
+	PositionSide PositionSide
+	ReduceOnly   bool
+	Price        decimal.Decimal
+	Qty          decimal.Decimal
+	Status       OrderStatus
+	Time         time.Time
 }
 
 type Rules struct {

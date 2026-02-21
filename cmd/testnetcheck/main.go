@@ -117,6 +117,15 @@ func main() {
 		if marketLoaded {
 			return nil
 		}
+		if err := client.ConfigureFutures(
+			ctx,
+			cfg.Symbol,
+			string(cfg.Exchange.PositionMode),
+			string(cfg.Exchange.MarginType),
+			cfg.Exchange.Leverage,
+		); err != nil {
+			return err
+		}
 		var err error
 		rules, err = client.GetRules(ctx, cfg.Symbol)
 		if err != nil {
@@ -402,8 +411,9 @@ func runBootstrapDistributionCheck(ctx context.Context, cfg config.Config, clien
 		return "", err
 	}
 
-	strat := strategy.NewSpotDual(
+	strat := strategy.NewFuturesGrid(
 		cfg.Symbol,
+		strategy.ContractMode(cfg.Grid.ContractMode),
 		cfg.Grid.StopPrice.Decimal,
 		cfg.Grid.Ratio.Decimal,
 		cfg.Grid.Levels,
@@ -435,8 +445,18 @@ func runBootstrapDistributionCheck(ctx context.Context, cfg config.Config, clien
 		return "", errors.New("bootstrap placed no new open orders")
 	}
 
-	expectedSell := cfg.Grid.ShiftLevels
-	expectedBuy := cfg.Grid.Levels
+	mode := strings.ToLower(strings.TrimSpace(string(cfg.Grid.ContractMode)))
+	expectedSell := 0
+	expectedBuy := 0
+	switch mode {
+	case "long":
+		expectedBuy = cfg.Grid.Levels
+	case "short":
+		expectedSell = cfg.Grid.Levels
+	default:
+		expectedSell = cfg.Grid.Levels
+		expectedBuy = cfg.Grid.Levels
+	}
 	expectedTotal := expectedSell + expectedBuy
 	if len(added) != expectedTotal {
 		return "", fmt.Errorf("unexpected bootstrap open order count: expected=%d got=%d", expectedTotal, len(added))
@@ -467,7 +487,7 @@ func runBootstrapDistributionCheck(ctx context.Context, cfg config.Config, clien
 		}
 		sellObs[p]--
 	}
-	for i := -1; i >= -cfg.Grid.Levels; i-- {
+	for i := -1; i >= -expectedBuy; i-- {
 		p := priceForLevel(anchor, cfg.Grid.Ratio.Decimal, i, rules.PriceTick).String()
 		if buyObs[p] <= 0 {
 			return "", fmt.Errorf("missing expected buy level=%d price=%s", i, p)

@@ -115,7 +115,7 @@ func TestDoRequestInvalidPostMethodReturnsErrorWithoutPanic(t *testing.T) {
 		}
 	}()
 
-	_, err := c.doRequest(context.Background(), "PO\nST", "/api/v3/order", url.Values{"symbol": {"BTCUSDT"}}, AuthNone)
+	_, err := c.doRequest(context.Background(), "PO\nST", "/fapi/v1/order", url.Values{"symbol": {"BTCUSDT"}}, AuthNone)
 	if err == nil {
 		t.Fatalf("doRequest() error = nil, want invalid method error")
 	}
@@ -245,7 +245,7 @@ func TestPlaceOrderRESTDuplicateFallbackByClientID(t *testing.T) {
 	var postCalls int32
 	var getCalls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v3/order" {
+		if r.URL.Path != "/fapi/v1/order" {
 			http.NotFound(w, r)
 			return
 		}
@@ -311,7 +311,7 @@ func TestPlaceOrderFallsBackToRESTWhenWSUnavailable(t *testing.T) {
 	var postCalls int32
 	var seenClientID string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v3/order" || r.Method != http.MethodPost {
+		if r.URL.Path != "/fapi/v1/order" || r.Method != http.MethodPost {
 			http.NotFound(w, r)
 			return
 		}

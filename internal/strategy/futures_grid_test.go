@@ -71,35 +71,16 @@ func (f *insufficientDuringRebuildExecutor) PlaceOrder(ctx context.Context, orde
 	return f.fakeExecutor.PlaceOrder(ctx, order)
 }
 
-type sellCapacityExecutor struct {
-	fakeExecutor
-}
-
-func (f *sellCapacityExecutor) PlaceOrder(ctx context.Context, order core.Order) (core.Order, error) {
-	if order.Type == core.Limit && order.Side == core.Sell {
-		lockedSell := decimal.Zero
-		for _, placed := range f.placed {
-			if placed.Type == core.Limit && placed.Side == core.Sell {
-				lockedSell = lockedSell.Add(placed.Qty)
-			}
-		}
-		freeBase := f.balance.Base.Sub(lockedSell)
-		if freeBase.Cmp(order.Qty) < 0 {
-			return core.Order{}, fmt.Errorf("%w: base balance", core.ErrInsufficientBalance)
-		}
-	}
-	return f.fakeExecutor.PlaceOrder(ctx, order)
-}
-
-func newSpotDualForTest(levels, shift int, baseBalance string) (*SpotDual, *fakeExecutor) {
+func newFuturesGridForTest(levels, shift int, baseBalance string) (*FuturesGrid, *fakeExecutor) {
 	exec := &fakeExecutor{
 		balance: core.Balance{
 			Base:  decimal.RequireFromString(baseBalance),
 			Quote: decimal.NewFromInt(1_000_000),
 		},
 	}
-	s := NewSpotDual(
+	s := NewFuturesGrid(
 		"BTCUSDT",
+		ContractModeDual,
 		decimal.Zero,
 		decimal.RequireFromString("1.1"),
 		levels,
@@ -113,7 +94,7 @@ func newSpotDualForTest(levels, shift int, baseBalance string) (*SpotDual, *fake
 	return s, exec
 }
 
-func findOpenOrder(s *SpotDual, side core.Side, idx int) (core.Order, bool) {
+func findOpenOrder(s *FuturesGrid, side core.Side, idx int) (core.Order, bool) {
 	for _, ord := range s.openOrders {
 		if ord.Side == side && ord.GridIndex == idx {
 			return ord, true
@@ -122,7 +103,7 @@ func findOpenOrder(s *SpotDual, side core.Side, idx int) (core.Order, bool) {
 	return core.Order{}, false
 }
 
-func hasAnyOpenOrderAtLevel(s *SpotDual, idx int) bool {
+func hasAnyOpenOrderAtLevel(s *FuturesGrid, idx int) bool {
 	for _, ord := range s.openOrders {
 		if ord.GridIndex == idx {
 			return true
@@ -131,24 +112,24 @@ func hasAnyOpenOrderAtLevel(s *SpotDual, idx int) bool {
 	return false
 }
 
-func TestSpotDualInitPlacesInitialOrders(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridInitPlacesInitialOrders(t *testing.T) {
+	s, _ := newFuturesGridForTest(3, 1, "10")
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	if !s.initialized {
 		t.Fatalf("strategy should be initialized")
 	}
-	if s.maxLevel != 1 {
-		t.Fatalf("maxLevel = %d, want 1", s.maxLevel)
+	if s.maxLevel != 3 {
+		t.Fatalf("maxLevel = %d, want 3", s.maxLevel)
 	}
 	if s.minLevel != -3 {
 		t.Fatalf("minLevel = %d, want -3", s.minLevel)
 	}
-	if len(s.openOrders) != 4 {
-		t.Fatalf("open orders = %d, want 4", len(s.openOrders))
+	if len(s.openOrders) != 6 {
+		t.Fatalf("open orders = %d, want 6", len(s.openOrders))
 	}
-	for _, level := range []int{1} {
+	for _, level := range []int{1, 2, 3} {
 		if _, ok := findOpenOrder(s, core.Sell, level); !ok {
 			t.Fatalf("missing sell order at level %d", level)
 		}
@@ -160,8 +141,8 @@ func TestSpotDualInitPlacesInitialOrders(t *testing.T) {
 	}
 }
 
-func TestSpotDualPriceForLevelUsesBuyAndSellRatios(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridPriceForLevelUsesBuyAndSellRatios(t *testing.T) {
+	s, _ := newFuturesGridForTest(3, 1, "10")
 	s.Ratio = decimal.RequireFromString("1.01")
 	s.SetSellRatio(decimal.RequireFromString("1.05"))
 	s.anchor = decimal.NewFromInt(100)
@@ -179,15 +160,16 @@ func TestSpotDualPriceForLevelUsesBuyAndSellRatios(t *testing.T) {
 	}
 }
 
-func TestSpotDualPlaceLimitKeepsBuyAndSellQtyEqual(t *testing.T) {
+func TestFuturesGridPlaceLimitKeepsBuyAndSellQtyEqual(t *testing.T) {
 	exec := &fakeExecutor{
 		balance: core.Balance{
 			Base:  decimal.RequireFromString("100"),
 			Quote: decimal.RequireFromString("1000000"),
 		},
 	}
-	s := NewSpotDual(
+	s := NewFuturesGrid(
 		"BTCUSDT",
+		ContractModeDual,
 		decimal.Zero,
 		decimal.RequireFromString("1.01"),
 		3,
@@ -228,8 +210,8 @@ func TestSpotDualPlaceLimitKeepsBuyAndSellQtyEqual(t *testing.T) {
 	}
 }
 
-func TestSpotDualInitBuysMissingBaseAtStartup(t *testing.T) {
-	s, exec := newSpotDualForTest(3, 1, "0")
+func TestFuturesGridInitDoesNotRequireBaseBootstrapMarketBuy(t *testing.T) {
+	s, exec := newFuturesGridForTest(3, 1, "0")
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -238,18 +220,15 @@ func TestSpotDualInitBuysMissingBaseAtStartup(t *testing.T) {
 	for _, ord := range exec.placed {
 		if ord.Type == core.Market && ord.Side == core.Buy {
 			marketBuyCount++
-			if !ord.Qty.Equal(decimal.NewFromInt(1)) {
-				t.Fatalf("market buy qty = %s, want 1", ord.Qty)
-			}
 		}
 	}
-	if marketBuyCount != 1 {
-		t.Fatalf("market buy count = %d, want 1", marketBuyCount)
+	if marketBuyCount != 0 {
+		t.Fatalf("market buy count = %d, want 0", marketBuyCount)
 	}
 }
 
-func TestSpotDualOnFillSellAtTopShiftsUp(t *testing.T) {
-	s, exec := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridOnFillSellAtTopShiftsUp(t *testing.T) {
+	s, exec := newFuturesGridForTest(3, 1, "10")
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -291,13 +270,13 @@ func TestSpotDualOnFillSellAtTopShiftsUp(t *testing.T) {
 	if len(exec.canceled) != 1 || exec.canceled[0] != lowestBuy.ID {
 		t.Fatalf("unexpected canceled orders: %+v, want [%s]", exec.canceled, lowestBuy.ID)
 	}
-	if _, ok := findOpenOrder(s, core.Buy, oldMax); !ok {
-		t.Fatalf("missing replacement buy at level %d", oldMax)
+	if _, ok := findOpenOrder(s, core.Buy, oldMax); ok {
+		t.Fatalf("unexpected pre-placed reduce-only buy at level %d", oldMax)
 	}
 }
 
-func TestSpotDualOnFillBuyAtBottomExtendsDown(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridOnFillBuyAtBottomExtendsDown(t *testing.T) {
+	s, _ := newFuturesGridForTest(3, 1, "10")
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -319,19 +298,19 @@ func TestSpotDualOnFillBuyAtBottomExtendsDown(t *testing.T) {
 		t.Fatalf("OnFill() error = %v", err)
 	}
 
-	wantMin := oldMin - s.Levels
+	wantMin := oldMin - s.shiftLevels()
 	if s.minLevel != wantMin {
 		t.Fatalf("minLevel = %d, want %d", s.minLevel, wantMin)
 	}
-	for _, level := range []int{oldMin - 1, oldMin - 2, oldMin - 3} {
+	for level := oldMin - 1; level >= wantMin; level-- {
 		if _, ok := findOpenOrder(s, core.Buy, level); !ok {
 			t.Fatalf("missing extended buy at level %d", level)
 		}
 	}
 }
 
-func TestSpotDualOnFillBuyAtBottomExtendsDownWithRatioQtyMultiple(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridOnFillBuyAtBottomExtendsDownWithRatioQtyMultiple(t *testing.T) {
+	s, _ := newFuturesGridForTest(3, 1, "10")
 	s.SetRatioQtyMultiple(decimal.RequireFromString("1.2"))
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
 		t.Fatalf("Init() error = %v", err)
@@ -355,7 +334,8 @@ func TestSpotDualOnFillBuyAtBottomExtendsDownWithRatioQtyMultiple(t *testing.T) 
 	}
 
 	wantQty := decimal.RequireFromString("1.2")
-	for _, level := range []int{oldMin - 1, oldMin - 2, oldMin - 3} {
+	wantMin := oldMin - s.shiftLevels()
+	for level := oldMin - 1; level >= wantMin; level-- {
 		buy, ok := findOpenOrder(s, core.Buy, level)
 		if !ok {
 			t.Fatalf("missing extended buy at level %d", level)
@@ -374,8 +354,149 @@ func TestSpotDualOnFillBuyAtBottomExtendsDownWithRatioQtyMultiple(t *testing.T) 
 	}
 }
 
-func TestSpotDualDownShiftDefenseRaisesBuyRatioOnEveryShift(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridLongModeOnFillBuyAtBottomExtendsDown(t *testing.T) {
+	exec := &fakeExecutor{
+		balance: core.Balance{
+			Base:  decimal.RequireFromString("10"),
+			Quote: decimal.NewFromInt(1_000_000),
+		},
+	}
+	s := NewFuturesGrid(
+		"BTCUSDT",
+		ContractModeLong,
+		decimal.Zero,
+		decimal.RequireFromString("1.1"),
+		3,
+		1,
+		decimal.NewFromInt(1),
+		1,
+		core.Rules{},
+		nil,
+		exec,
+	)
+	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if s.maxLevel != 0 || s.minLevel != -3 {
+		t.Fatalf("window = [%d,%d], want [-3,0]", s.minLevel, s.maxLevel)
+	}
+	for _, level := range []int{-1, -2, -3} {
+		if _, ok := findOpenOrder(s, core.Buy, level); !ok {
+			t.Fatalf("missing long-mode buy order at level %d", level)
+		}
+	}
+
+	bottomBuy, ok := findOpenOrder(s, core.Buy, s.minLevel)
+	if !ok {
+		t.Fatalf("missing long-mode bottom buy")
+	}
+	oldMin := s.minLevel
+	if err := s.OnFill(context.Background(), core.Trade{
+		OrderID: bottomBuy.ID,
+		Symbol:  s.Symbol,
+		Side:    core.Buy,
+		Price:   bottomBuy.Price,
+		Qty:     bottomBuy.Qty,
+		Time:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("OnFill() error = %v", err)
+	}
+
+	if s.maxLevel != 0 {
+		t.Fatalf("maxLevel = %d, want 0 (long mode should not shift up)", s.maxLevel)
+	}
+	wantMin := oldMin - s.shiftLevels()
+	if s.minLevel != wantMin {
+		t.Fatalf("minLevel = %d, want %d", s.minLevel, wantMin)
+	}
+	for level := oldMin - 1; level >= wantMin; level-- {
+		if _, ok := findOpenOrder(s, core.Buy, level); !ok {
+			t.Fatalf("missing extended long-mode buy at level %d", level)
+		}
+	}
+	if _, ok := findOpenOrder(s, core.Sell, oldMin+1); !ok {
+		t.Fatalf("missing long-mode counter sell at level %d", oldMin+1)
+	}
+	if len(exec.canceled) != 0 {
+		t.Fatalf("canceled orders = %d, want 0", len(exec.canceled))
+	}
+}
+
+func TestFuturesGridShortModeOnFillSellAtTopExtendsUp(t *testing.T) {
+	exec := &fakeExecutor{
+		balance: core.Balance{
+			Base:  decimal.RequireFromString("10"),
+			Quote: decimal.NewFromInt(1_000_000),
+		},
+	}
+	s := NewFuturesGrid(
+		"BTCUSDT",
+		ContractModeShort,
+		decimal.Zero,
+		decimal.RequireFromString("1.1"),
+		3,
+		1,
+		decimal.NewFromInt(1),
+		1,
+		core.Rules{},
+		nil,
+		exec,
+	)
+	s.SetRatioQtyMultiple(decimal.RequireFromString("1.2"))
+	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if s.minLevel != 0 || s.maxLevel != 3 {
+		t.Fatalf("window = [%d,%d], want [0,3]", s.minLevel, s.maxLevel)
+	}
+	for _, level := range []int{1, 2, 3} {
+		if _, ok := findOpenOrder(s, core.Sell, level); !ok {
+			t.Fatalf("missing short-mode sell order at level %d", level)
+		}
+	}
+
+	topSell, ok := findOpenOrder(s, core.Sell, s.maxLevel)
+	if !ok {
+		t.Fatalf("missing short-mode top sell")
+	}
+	oldMax := s.maxLevel
+	if err := s.OnFill(context.Background(), core.Trade{
+		OrderID: topSell.ID,
+		Symbol:  s.Symbol,
+		Side:    core.Sell,
+		Price:   topSell.Price,
+		Qty:     topSell.Qty,
+		Time:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("OnFill() error = %v", err)
+	}
+
+	if s.minLevel != 0 {
+		t.Fatalf("minLevel = %d, want 0 (short mode should not shift down)", s.minLevel)
+	}
+	wantMax := oldMax + s.shiftLevels()
+	if s.maxLevel != wantMax {
+		t.Fatalf("maxLevel = %d, want %d", s.maxLevel, wantMax)
+	}
+	if _, ok := findOpenOrder(s, core.Buy, oldMax-1); !ok {
+		t.Fatalf("missing short-mode counter buy at level %d", oldMax-1)
+	}
+	for level := oldMax + 1; level <= wantMax; level++ {
+		ord, ok := findOpenOrder(s, core.Sell, level)
+		if !ok {
+			t.Fatalf("missing extended short-mode sell at level %d", level)
+		}
+		if !ord.Qty.Equal(decimal.NewFromInt(1)) {
+			t.Fatalf("extended short-mode sell qty at level %d = %s, want 1", level, ord.Qty)
+		}
+	}
+	if len(exec.canceled) != 0 {
+		t.Fatalf("canceled orders = %d, want 0", len(exec.canceled))
+	}
+}
+
+func TestFuturesGridDownShiftDefenseRaisesBuyRatioOnEveryShift(t *testing.T) {
+	s, _ := newFuturesGridForTest(3, 1, "10")
 	s.Ratio = decimal.RequireFromString("1.1")
 	s.baseBuyRatio = decimal.RequireFromString("1.1")
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
@@ -420,8 +541,8 @@ func TestSpotDualDownShiftDefenseRaisesBuyRatioOnEveryShift(t *testing.T) {
 	}
 }
 
-func TestSpotDualDownShiftDefenseCanDisableRatioIncrement(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridDownShiftDefenseCanDisableRatioIncrement(t *testing.T) {
+	s, _ := newFuturesGridForTest(3, 1, "10")
 	s.Ratio = decimal.RequireFromString("1.1")
 	s.baseBuyRatio = decimal.RequireFromString("1.1")
 	s.SetRatioStep(decimal.Zero)
@@ -466,8 +587,8 @@ func TestSpotDualDownShiftDefenseCanDisableRatioIncrement(t *testing.T) {
 	}
 }
 
-func TestSpotDualSetRatioStepIgnoresNegativeValue(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridSetRatioStepIgnoresNegativeValue(t *testing.T) {
+	s, _ := newFuturesGridForTest(3, 1, "10")
 	s.Ratio = decimal.RequireFromString("1.1")
 	s.baseBuyRatio = decimal.RequireFromString("1.1")
 	s.SetRatioStep(decimal.RequireFromString("0.003"))
@@ -479,8 +600,8 @@ func TestSpotDualSetRatioStepIgnoresNegativeValue(t *testing.T) {
 	}
 }
 
-func TestSpotDualSetRatioQtyMultipleIgnoresNonPositiveValue(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridSetRatioQtyMultipleIgnoresNonPositiveValue(t *testing.T) {
+	s, _ := newFuturesGridForTest(3, 1, "10")
 	s.SetRatioQtyMultiple(decimal.RequireFromString("1.2"))
 	s.SetRatioQtyMultiple(decimal.Zero)
 	s.SetRatioQtyMultiple(decimal.RequireFromString("-1"))
@@ -489,8 +610,8 @@ func TestSpotDualSetRatioQtyMultipleIgnoresNonPositiveValue(t *testing.T) {
 	}
 }
 
-func TestSpotDualDownShiftDefenseDoesNotRestoreOnTickWithoutShiftUp(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridDownShiftDefenseDoesNotRestoreOnTickWithoutShiftUp(t *testing.T) {
+	s, _ := newFuturesGridForTest(3, 1, "10")
 	s.initialized = true
 	s.anchor = decimal.NewFromInt(100)
 	s.baseBuyRatio = decimal.RequireFromString("1.1")
@@ -512,8 +633,8 @@ func TestSpotDualDownShiftDefenseDoesNotRestoreOnTickWithoutShiftUp(t *testing.T
 	}
 }
 
-func TestSpotDualDownShiftDefenseRestoresBuyRatioOnShiftUp(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridDownShiftDefenseRestoresBuyRatioOnShiftUp(t *testing.T) {
+	s, _ := newFuturesGridForTest(3, 1, "10")
 	s.baseBuyRatio = decimal.RequireFromString("1.1")
 	s.Ratio = decimal.RequireFromString("1.103")
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
@@ -545,8 +666,8 @@ func TestSpotDualDownShiftDefenseRestoresBuyRatioOnShiftUp(t *testing.T) {
 	}
 }
 
-func TestSpotDualDownShiftDefenseAfterRestoreRaisesOnNextShift(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridDownShiftDefenseAfterRestoreRaisesOnNextShift(t *testing.T) {
+	s, _ := newFuturesGridForTest(3, 1, "10")
 	s.baseBuyRatio = decimal.RequireFromString("1.1")
 	s.Ratio = decimal.RequireFromString("1.103")
 	now := time.Now().UTC()
@@ -565,8 +686,8 @@ func TestSpotDualDownShiftDefenseAfterRestoreRaisesOnNextShift(t *testing.T) {
 	}
 }
 
-func TestSpotDualShiftUpCancelFailureKeepsFailedOrderTracked(t *testing.T) {
-	s, exec := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridShiftUpCancelFailureKeepsFailedOrderTracked(t *testing.T) {
+	s, exec := newFuturesGridForTest(3, 1, "10")
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -605,8 +726,8 @@ func TestSpotDualShiftUpCancelFailureKeepsFailedOrderTracked(t *testing.T) {
 	}
 }
 
-func TestSpotDualOnFillPartialThenFilled(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridOnFillPartialThenFilled(t *testing.T) {
+	s, _ := newFuturesGridForTest(3, 1, "10")
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -662,8 +783,8 @@ func TestSpotDualOnFillPartialThenFilled(t *testing.T) {
 	}
 }
 
-func TestSpotDualOnFillClosedWithPartialDoesNotPlaceCounterOrder(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridOnFillClosedWithPartialDoesNotPlaceCounterOrder(t *testing.T) {
+	s, _ := newFuturesGridForTest(3, 1, "10")
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -696,8 +817,8 @@ func TestSpotDualOnFillClosedWithPartialDoesNotPlaceCounterOrder(t *testing.T) {
 	}
 }
 
-func TestSpotDualInitStopsWhenPriceAboveStopPrice(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridInitStopsWhenPriceAboveStopPrice(t *testing.T) {
+	s, _ := newFuturesGridForTest(3, 1, "10")
 	s.StopPrice = decimal.NewFromInt(99)
 
 	err := s.Init(context.Background(), decimal.NewFromInt(100))
@@ -712,12 +833,13 @@ func TestSpotDualInitStopsWhenPriceAboveStopPrice(t *testing.T) {
 	}
 }
 
-func TestSpotDualOnFillStopsAndCancelsOpenOrders(t *testing.T) {
-	s, exec := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridOnFillStopsAndCancelsOpenOrders(t *testing.T) {
+	s, exec := newFuturesGridForTest(3, 1, "10")
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	s.StopPrice = decimal.NewFromInt(105)
+	expectedCancels := len(s.openOrders) - 1
 
 	topSell, ok := findOpenOrder(s, core.Sell, s.maxLevel)
 	if !ok {
@@ -737,34 +859,24 @@ func TestSpotDualOnFillStopsAndCancelsOpenOrders(t *testing.T) {
 	if !s.stopped {
 		t.Fatalf("strategy should be stopped")
 	}
-	if len(exec.canceled) != 3 {
-		t.Fatalf("canceled orders = %d, want 3", len(exec.canceled))
+	if len(exec.canceled) != expectedCancels {
+		t.Fatalf("canceled orders = %d, want %d", len(exec.canceled), expectedCancels)
 	}
 	if len(s.openOrders) != 0 {
 		t.Fatalf("open orders = %d, want 0", len(s.openOrders))
 	}
 }
 
-func TestSpotDualStopNowCancelsOnlyBuyOrders(t *testing.T) {
-	s, exec := newSpotDualForTest(3, 2, "10")
+func TestFuturesGridStopNowCancelsAllOrders(t *testing.T) {
+	s, exec := newFuturesGridForTest(3, 2, "10")
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
-	buyIDs := make(map[string]struct{})
-	sellCount := 0
+	totalOpen := len(s.openOrders)
 	for id, ord := range s.openOrders {
-		if ord.Side == core.Buy {
-			buyIDs[id] = struct{}{}
+		if id == "" || ord.Symbol == "" {
+			t.Fatalf("unexpected empty order metadata before stop")
 		}
-		if ord.Side == core.Sell {
-			sellCount++
-		}
-	}
-	if len(buyIDs) != 3 {
-		t.Fatalf("buy orders before stop = %d, want 3", len(buyIDs))
-	}
-	if sellCount != 2 {
-		t.Fatalf("sell orders before stop = %d, want 2", sellCount)
 	}
 
 	s.StopPrice = decimal.NewFromInt(105)
@@ -775,26 +887,16 @@ func TestSpotDualStopNowCancelsOnlyBuyOrders(t *testing.T) {
 	if !s.stopped {
 		t.Fatalf("strategy should be stopped")
 	}
-	if len(exec.canceled) != len(buyIDs) {
-		t.Fatalf("canceled orders = %d, want %d", len(exec.canceled), len(buyIDs))
+	if len(exec.canceled) != totalOpen {
+		t.Fatalf("canceled orders = %d, want %d", len(exec.canceled), totalOpen)
 	}
-	for _, id := range exec.canceled {
-		if _, ok := buyIDs[id]; !ok {
-			t.Fatalf("canceled non-buy order id = %s", id)
-		}
-	}
-	if len(s.openOrders) != sellCount {
-		t.Fatalf("open orders after stop = %d, want %d", len(s.openOrders), sellCount)
-	}
-	for _, ord := range s.openOrders {
-		if ord.Side != core.Sell {
-			t.Fatalf("remaining order side = %s, want SELL only", ord.Side)
-		}
+	if len(s.openOrders) != 0 {
+		t.Fatalf("open orders after stop = %d, want 0", len(s.openOrders))
 	}
 }
 
-func TestSpotDualStopNowIgnoresCancelBuyErrors(t *testing.T) {
-	s, exec := newSpotDualForTest(3, 2, "10")
+func TestFuturesGridStopNowIgnoresCancelBuyErrors(t *testing.T) {
+	s, exec := newFuturesGridForTest(3, 2, "10")
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -825,8 +927,8 @@ func TestSpotDualStopNowIgnoresCancelBuyErrors(t *testing.T) {
 	}
 }
 
-func TestSpotDualReconcileStoppedRetriesCancelBuyOrdersUntilCleared(t *testing.T) {
-	s, exec := newSpotDualForTest(3, 2, "10")
+func TestFuturesGridReconcileStoppedRetriesCancelBuyOrdersUntilCleared(t *testing.T) {
+	s, exec := newFuturesGridForTest(3, 2, "10")
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -868,8 +970,8 @@ func TestSpotDualReconcileStoppedRetriesCancelBuyOrdersUntilCleared(t *testing.T
 	}
 }
 
-func TestSpotDualReconcileStoppedReturnsErrStoppedWhenNoBuyOrders(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 2, "10")
+func TestFuturesGridReconcileStoppedReturnsErrStoppedWhenNoBuyOrders(t *testing.T) {
+	s, _ := newFuturesGridForTest(3, 2, "10")
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -887,8 +989,8 @@ func TestSpotDualReconcileStoppedReturnsErrStoppedWhenNoBuyOrders(t *testing.T) 
 	}
 }
 
-func TestSpotDualReconcileFillsOrderGaps(t *testing.T) {
-	s, exec := newSpotDualForTest(2, 1, "10")
+func TestFuturesGridReconcileFillsOrderGaps(t *testing.T) {
+	s, exec := newFuturesGridForTest(2, 1, "10")
 	s.LoadState(store.GridState{
 		Symbol:      "BTCUSDT",
 		Anchor:      decimal.NewFromInt(100),
@@ -929,8 +1031,8 @@ func TestSpotDualReconcileFillsOrderGaps(t *testing.T) {
 	}
 }
 
-func TestSpotDualReconcileKeepsZeroMinLevelAfterShiftedState(t *testing.T) {
-	s, _ := newSpotDualForTest(3, 1, "10")
+func TestFuturesGridReconcileKeepsZeroMinLevelAfterShiftedState(t *testing.T) {
+	s, _ := newFuturesGridForTest(3, 1, "10")
 	s.LoadState(store.GridState{
 		Symbol:      "BTCUSDT",
 		Anchor:      decimal.NewFromInt(100),
@@ -952,8 +1054,8 @@ func TestSpotDualReconcileKeepsZeroMinLevelAfterShiftedState(t *testing.T) {
 	}
 }
 
-func TestSpotDualReconcileCancelsDuplicateLevelOrders(t *testing.T) {
-	s, exec := newSpotDualForTest(2, 1, "10")
+func TestFuturesGridReconcileCancelsDuplicateLevelOrders(t *testing.T) {
+	s, exec := newFuturesGridForTest(2, 1, "10")
 	s.LoadState(store.GridState{
 		Symbol:      "BTCUSDT",
 		Anchor:      decimal.NewFromInt(100),
@@ -1031,8 +1133,8 @@ func TestSpotDualReconcileCancelsDuplicateLevelOrders(t *testing.T) {
 	}
 }
 
-func TestSpotDualReconcileCancelsConflictingSideThenRefillsBySideAndLevel(t *testing.T) {
-	s, exec := newSpotDualForTest(2, 1, "10")
+func TestFuturesGridReconcileKeepsCrossSideOrdersAndRefillsBaseGrid(t *testing.T) {
+	s, exec := newFuturesGridForTest(2, 1, "10")
 	s.LoadState(store.GridState{
 		Symbol:      "BTCUSDT",
 		Anchor:      decimal.NewFromInt(100),
@@ -1081,18 +1183,8 @@ func TestSpotDualReconcileCancelsConflictingSideThenRefillsBySideAndLevel(t *tes
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 
-	if len(exec.canceled) != 2 {
-		t.Fatalf("canceled orders = %d, want 2", len(exec.canceled))
-	}
-	canceled := map[string]struct{}{}
-	for _, id := range exec.canceled {
-		canceled[id] = struct{}{}
-	}
-	if _, ok := canceled["conflict-buy-1"]; !ok {
-		t.Fatalf("missing canceled conflict order conflict-buy-1")
-	}
-	if _, ok := canceled["conflict-sell-minus-1"]; !ok {
-		t.Fatalf("missing canceled conflict order conflict-sell-minus-1")
+	if len(exec.canceled) != 0 {
+		t.Fatalf("canceled orders = %d, want 0", len(exec.canceled))
 	}
 
 	for _, tc := range []struct {
@@ -1108,10 +1200,16 @@ func TestSpotDualReconcileCancelsConflictingSideThenRefillsBySideAndLevel(t *tes
 			t.Fatalf("missing order side=%s level=%d", tc.side, tc.level)
 		}
 	}
+	if _, ok := s.openOrders["conflict-buy-1"]; !ok {
+		t.Fatalf("existing cross-side order conflict-buy-1 should be kept")
+	}
+	if _, ok := s.openOrders["conflict-sell-minus-1"]; !ok {
+		t.Fatalf("existing cross-side order conflict-sell-minus-1 should be kept")
+	}
 }
 
-func TestSpotDualShiftUpTriggersMarketBuyWhenBaseInsufficient(t *testing.T) {
-	s, exec := newSpotDualForTest(3, 1, "2")
+func TestFuturesGridShiftUpDoesNotMarketBuyBase(t *testing.T) {
+	s, exec := newFuturesGridForTest(3, 1, "2")
 	if err := s.Init(context.Background(), decimal.NewFromInt(100)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -1139,12 +1237,12 @@ func TestSpotDualShiftUpTriggersMarketBuyWhenBaseInsufficient(t *testing.T) {
 			marketBuyCount++
 		}
 	}
-	if marketBuyCount != 1 {
-		t.Fatalf("shiftUp market buy count = %d, want 1", marketBuyCount)
+	if marketBuyCount != 0 {
+		t.Fatalf("shiftUp market buy count = %d, want 0", marketBuyCount)
 	}
 }
 
-func TestSpotDualPlaceLimitSkipsInsufficientBalance(t *testing.T) {
+func TestFuturesGridPlaceLimitSkipsInsufficientBalance(t *testing.T) {
 	exec := &insufficientDuringRebuildExecutor{
 		fakeExecutor: fakeExecutor{
 			balance: core.Balance{
@@ -1154,8 +1252,9 @@ func TestSpotDualPlaceLimitSkipsInsufficientBalance(t *testing.T) {
 		},
 		failBuyLimit: true,
 	}
-	s := NewSpotDual(
+	s := NewFuturesGrid(
 		"BTCUSDT",
+		ContractModeDual,
 		decimal.Zero,
 		decimal.RequireFromString("1.1"),
 		3,
@@ -1178,17 +1277,16 @@ func TestSpotDualPlaceLimitSkipsInsufficientBalance(t *testing.T) {
 	}
 }
 
-func TestSpotDualReconcileBuysBaseBeforeRefillingMissingSellLevels(t *testing.T) {
-	exec := &sellCapacityExecutor{
-		fakeExecutor: fakeExecutor{
-			balance: core.Balance{
-				Base:  decimal.NewFromInt(1),
-				Quote: decimal.RequireFromString("1000000"),
-			},
+func TestFuturesGridReconcileRefillsMissingSellLevelsWithoutMarketBuy(t *testing.T) {
+	exec := &fakeExecutor{
+		balance: core.Balance{
+			Base:  decimal.Zero,
+			Quote: decimal.RequireFromString("1000000"),
 		},
 	}
-	s := NewSpotDual(
+	s := NewFuturesGrid(
 		"BTCUSDT",
+		ContractModeDual,
 		decimal.Zero,
 		decimal.RequireFromString("1.1"),
 		3,
@@ -1256,12 +1354,12 @@ func TestSpotDualReconcileBuysBaseBeforeRefillingMissingSellLevels(t *testing.T)
 			}
 		}
 	}
-	if marketBuyCount != 1 {
-		t.Fatalf("reconcile market buy count = %d, want 1", marketBuyCount)
+	if marketBuyCount != 0 {
+		t.Fatalf("reconcile market buy count = %d, want 0", marketBuyCount)
 	}
 }
 
-func TestSpotDualReconcileReturnsErrorWhenBaseBuyForMissingSellsFails(t *testing.T) {
+func TestFuturesGridReconcileDoesNotDependOnMarketBuyPath(t *testing.T) {
 	exec := &insufficientDuringRebuildExecutor{
 		fakeExecutor: fakeExecutor{
 			balance: core.Balance{
@@ -1271,8 +1369,9 @@ func TestSpotDualReconcileReturnsErrorWhenBaseBuyForMissingSellsFails(t *testing
 		},
 		failMarketBuy: true,
 	}
-	s := NewSpotDual(
+	s := NewFuturesGrid(
 		"BTCUSDT",
+		ContractModeDual,
 		decimal.Zero,
 		decimal.RequireFromString("1.1"),
 		3,
@@ -1319,13 +1418,13 @@ func TestSpotDualReconcileReturnsErrorWhenBaseBuyForMissingSellsFails(t *testing
 	}
 
 	err := s.Reconcile(context.Background(), decimal.NewFromInt(100), open)
-	if err == nil {
-		t.Fatalf("Reconcile() error = nil, want base buy failure")
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil", err)
 	}
-	if s.initialized {
-		t.Fatalf("strategy should not be initialized when reconcile fails")
+	if !s.initialized {
+		t.Fatalf("strategy should be initialized")
 	}
-	if _, ok := findOpenOrder(s, core.Sell, 1); ok {
-		t.Fatalf("unexpected sell order at level 1 when base buy failed")
+	if _, ok := findOpenOrder(s, core.Sell, 1); !ok {
+		t.Fatalf("missing sell order at level 1 after reconcile")
 	}
 }
