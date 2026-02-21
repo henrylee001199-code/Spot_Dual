@@ -25,7 +25,7 @@ internal/
   store/          # 状态与运行状态持久化
   config/         # 配置加载与校验
 config/
-  config.example.yaml
+  config.yaml
 state/            # 运行时状态（默认）
 ```
 
@@ -42,17 +42,14 @@ state/            # 运行时状态（默认）
 
 ## 3. 快速开始
 
-### 3.1 复制配置
-
-```bash
-cp config/config.example.yaml config/config.yaml
-```
+### 3.1 编辑配置
 
 按你的模式填写：
 
 - `mode`: `backtest` / `testnet` / `live`
 - `exchange.api_key` / `exchange.api_secret`
 - `symbol`、`grid.*` 参数
+- `instance_id`：建议使用 `coin_ratio` 命名（如 `btcusdt_r1012`）
 
 ### 3.2 运行测试
 
@@ -180,7 +177,7 @@ cp config/config.example.yaml config/config.yaml
 ```
 
 ### Q2: 配置报错（字段未知）
-配置解析开启了 `KnownFields(true)`，请检查 YAML 字段名是否与 `config.example.yaml` 一致。
+配置解析开启了 `KnownFields(true)`，请检查 YAML 字段名是否与 `config/config.yaml` 一致。
 
 ### Q3: 实盘重启后是否能恢复
 会从 `state` 目录加载网格状态与开单快照，并执行 reconcile。
@@ -190,3 +187,105 @@ cp config/config.example.yaml config/config.yaml
 ## 9. License
 
 当前仓库未声明许可证（可按你的需要补充 `LICENSE` 文件）。
+
+---
+
+## 10. 本地发布准备
+
+可用一键脚本在本地完成“测试 + Linux 二进制构建 + 打包”：
+
+```bash
+bash scripts/release_local.sh
+```
+
+也可以传入版本号：
+
+```bash
+bash scripts/release_local.sh v0.1.0
+```
+
+产物位于 `dist/` 目录，包含：
+
+- `spot-dual_<version>_linux_amd64/`
+- `spot-dual_<version>_linux_amd64.tar.gz`
+
+发布目录中会包含：
+
+- `bin/gridbot`
+- `bin/testnetcheck`
+- `config/config.yaml`
+- `scripts/run_gridbot.sh`
+- `scripts/run_testnet_check.sh`
+- `scripts/deploy/*.sh`
+- `deploy/systemd/*`
+- `SHA256SUMS`
+
+---
+
+## 11. 服务器部署（多实例）
+
+以下流程适用于 GCP/AWS Lightsail 的 Ubuntu 主机。
+
+### 11.1 初始化服务器目录与用户（只需一次）
+
+```bash
+sudo bash scripts/deploy/install_server_layout.sh
+sudo bash scripts/deploy/install_systemd_units.sh
+```
+
+默认会创建：
+
+- 程序目录：`/opt/spot-dual`
+- 配置目录：`/etc/spot-dual`
+- 状态目录：`/var/lib/spot-dual/state`
+- 运行用户：`spotdual`
+
+### 11.2 发布新版本
+
+先在本地构建发布包：
+
+```bash
+bash scripts/release_local.sh v0.1.0
+```
+
+把 `dist/spot-dual_v0.1.0_linux_amd64.tar.gz` 上传到服务器后执行：
+
+```bash
+sudo bash scripts/deploy/deploy_release.sh /tmp/spot-dual_v0.1.0_linux_amd64.tar.gz
+```
+
+### 11.3 创建实例配置
+
+示例：创建 10 个实例（同账号多实例，不同 `instance_id`，采用 `coin_ratio` 命名）：
+
+```bash
+for r in 1008 1010 1012 1014 1016 1018 1020 1022 1024 1026; do
+  sudo bash scripts/deploy/new_instance_config.sh "btcusdt_r${r}" BTCUSDT live
+done
+```
+
+然后逐个编辑 `/etc/spot-dual/btcusdt_r1012.yaml` 等配置，重点确认：
+
+- `exchange.api_key` / `exchange.api_secret`
+- `capital.base_budget` / `capital.quote_budget`
+- `symbol` 与 `grid.*`
+
+### 11.4 启动与运维
+
+```bash
+sudo systemctl enable --now spot-dual@btcusdt_r1012
+sudo systemctl status spot-dual@btcusdt_r1012
+sudo journalctl -u spot-dual@btcusdt_r1012 -f
+```
+
+批量启动：
+
+```bash
+sudo systemctl enable --now spot-dual@btcusdt_r1012 spot-dual@btcusdt_r1014 spot-dual@btcusdt_r1016
+```
+
+滚动重启（升级后）：
+
+```bash
+sudo systemctl restart spot-dual@btcusdt_r1012
+```

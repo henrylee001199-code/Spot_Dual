@@ -1,0 +1,25 @@
+[Unit]
+Description=Spot Dual instance %i
+After=network-online.target
+Wants=network-online.target
+PartOf=spot-dual.target
+
+[Service]
+Type=simple
+User=spotdual
+Group=spotdual
+WorkingDirectory=/opt/spot-dual/current
+EnvironmentFile=-/etc/spot-dual/%i.env
+ExecStart=/opt/spot-dual/current/bin/gridbot -config /etc/spot-dual/%i.yaml
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+WantedBy=spot-dual.target

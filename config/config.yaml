@@ -1,13 +1,13 @@
 mode: testnet # 运行模式：backtest | testnet | live
 symbol: BTCUSDT
-instance_id: bot1 # 用于状态路径与 clientOrderId 前缀
+instance_id: btcusdt_r1006 # 推荐 coin_ratio 命名（如 btcusdt_r1012），用于状态路径与 clientOrderId 前缀
 
 grid:
   stop_price: "0" # 市场价 > stop_price 时停止策略（0 表示禁用）
-  ratio: "1.012" # 买侧几何间距比率，必须 > 1
+  ratio: "1.006" # 买侧几何间距比率，必须 > 1
   ratio_step: "0.002" # 每次触发下移时买侧 ratio 的防守增量（0 表示禁用；省略则默认 0.002）
-  ratio_qty_multiple: "1.2" # 下移扩展时，新买单数量 = qty * ratio_qty_multiple
-  sell_ratio: "1.012" # 卖侧几何间距比率，必须 > 1
+  ratio_qty_multiple: "1.1" # 下移扩展时，新买单数量 = qty * ratio_qty_multiple
+  sell_ratio: "1.0065" # 卖侧几何间距比率，必须 > 1
   levels: 20 # 锚点下方激活的买单层数
   shift_levels: 10 # 锚点上方激活的卖单层数；也用作移窗步长
   mode: geometric # 仅支持 geometric
