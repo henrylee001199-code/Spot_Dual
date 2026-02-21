@@ -45,13 +45,14 @@ type orderQueryResponse struct {
 }
 
 type openOrderResponse struct {
-	Symbol      string `json:"symbol"`
-	OrderID     int64  `json:"orderId"`
-	Price       string `json:"price"`
-	OrigQty     string `json:"origQty"`
-	ExecutedQty string `json:"executedQty"`
-	Side        string `json:"side"`
-	Type        string `json:"type"`
+	Symbol        string `json:"symbol"`
+	OrderID       int64  `json:"orderId"`
+	ClientOrderID string `json:"clientOrderId"`
+	Price         string `json:"price"`
+	OrigQty       string `json:"origQty"`
+	ExecutedQty   string `json:"executedQty"`
+	Side          string `json:"side"`
+	Type          string `json:"type"`
 }
 
 type tickerPriceResponse struct {

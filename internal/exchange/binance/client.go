@@ -169,6 +169,18 @@ func (c *Client) getClientOrderPrefix() string {
 	return c.clientOrderPrefix
 }
 
+func (c *Client) OwnsClientID(clientID string) bool {
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" {
+		return false
+	}
+	prefix := c.getClientOrderPrefix()
+	if clientID == prefix {
+		return true
+	}
+	return strings.HasPrefix(clientID, prefix+"-")
+}
+
 func normalizeClientOrderPrefix(v string) string {
 	v = strings.ToLower(strings.TrimSpace(v))
 	if v == "" {
@@ -228,6 +240,9 @@ func (c *Client) OpenOrders(ctx context.Context, symbol string) ([]core.Order, e
 	}
 	orders := make([]core.Order, 0, len(resp))
 	for _, ord := range resp {
+		if !c.OwnsClientID(ord.ClientOrderID) {
+			continue
+		}
 		price, _ := decimal.NewFromString(ord.Price)
 		origQty, _ := decimal.NewFromString(ord.OrigQty)
 		executedQty, _ := decimal.NewFromString(ord.ExecutedQty)
@@ -236,13 +251,14 @@ func (c *Client) OpenOrders(ctx context.Context, symbol string) ([]core.Order, e
 			qty = origQty.Sub(executedQty)
 		}
 		orders = append(orders, core.Order{
-			ID:     strconv.FormatInt(ord.OrderID, 10),
-			Symbol: ord.Symbol,
-			Side:   core.Side(ord.Side),
-			Type:   core.OrderType(ord.Type),
-			Price:  price,
-			Qty:    qty,
-			Status: core.OrderNew,
+			ID:       strconv.FormatInt(ord.OrderID, 10),
+			ClientID: ord.ClientOrderID,
+			Symbol:   ord.Symbol,
+			Side:     core.Side(ord.Side),
+			Type:     core.OrderType(ord.Type),
+			Price:    price,
+			Qty:      qty,
+			Status:   core.OrderNew,
 		})
 	}
 	return orders, nil
@@ -323,16 +339,27 @@ func (c *Client) Balances(ctx context.Context) (core.Balance, error) {
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return core.Balance{}, err
 	}
-	bal := core.Balance{Base: decimal.Zero, Quote: decimal.Zero}
+	bal := core.Balance{
+		Base:        decimal.Zero,
+		Quote:       decimal.Zero,
+		BaseFree:    decimal.Zero,
+		BaseLocked:  decimal.Zero,
+		QuoteFree:   decimal.Zero,
+		QuoteLocked: decimal.Zero,
+	}
 	for _, b := range resp.Balances {
 		if b.Asset == info.baseAsset {
 			free, _ := decimal.NewFromString(b.Free)
 			locked, _ := decimal.NewFromString(b.Locked)
+			bal.BaseFree = free
+			bal.BaseLocked = locked
 			bal.Base = free.Add(locked)
 		}
 		if b.Asset == info.quoteAsset {
 			free, _ := decimal.NewFromString(b.Free)
 			locked, _ := decimal.NewFromString(b.Locked)
+			bal.QuoteFree = free
+			bal.QuoteLocked = locked
 			bal.Quote = free.Add(locked)
 		}
 	}

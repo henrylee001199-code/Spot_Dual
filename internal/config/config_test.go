@@ -345,6 +345,82 @@ backtest:
 	}
 }
 
+func TestLoadParsesCapitalBudgets(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+mode: backtest
+symbol: BTCUSDT
+
+grid:
+  ratio: "1.01"
+  levels: 20
+  qty: "0.001"
+
+capital:
+  base_budget: "1.5"
+  quote_budget: "200"
+
+backtest:
+  data_path: data/binance/BTCUSDT/1m
+  initial_base: "0"
+  initial_quote: "1000"
+  fees:
+    maker_rate: "0"
+    taker_rate: "0"
+  rules:
+    min_qty: "0"
+    min_notional: "0"
+    price_tick: "0"
+    qty_step: "0"
+`)
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if !cfg.Capital.BaseBudget.Equal(decimal.RequireFromString("1.5")) {
+		t.Fatalf("capital.base_budget = %s, want 1.5", cfg.Capital.BaseBudget.String())
+	}
+	if !cfg.Capital.QuoteBudget.Equal(decimal.RequireFromString("200")) {
+		t.Fatalf("capital.quote_budget = %s, want 200", cfg.Capital.QuoteBudget.String())
+	}
+}
+
+func TestLoadRejectsNegativeCapitalBudget(t *testing.T) {
+	cfgPath := writeTempConfig(t, `
+mode: backtest
+symbol: BTCUSDT
+
+grid:
+  ratio: "1.01"
+  levels: 20
+  qty: "0.001"
+
+capital:
+  quote_budget: "-1"
+
+backtest:
+  data_path: data/binance/BTCUSDT/1m
+  initial_base: "0"
+  initial_quote: "1000"
+  fees:
+    maker_rate: "0"
+    taker_rate: "0"
+  rules:
+    min_qty: "0"
+    min_notional: "0"
+    price_tick: "0"
+    qty_step: "0"
+`)
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatalf("Load() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "capital quote_budget must be >= 0") {
+		t.Fatalf("Load() error = %q, want capital quote_budget validation", err.Error())
+	}
+}
+
 func TestLoadRejectsInvalidRatioQtyMultiple(t *testing.T) {
 	cfgPath := writeTempConfig(t, `
 mode: backtest

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -1327,5 +1328,98 @@ func TestSpotDualReconcileReturnsErrorWhenBaseBuyForMissingSellsFails(t *testing
 	}
 	if _, ok := findOpenOrder(s, core.Sell, 1); ok {
 		t.Fatalf("unexpected sell order at level 1 when base buy failed")
+	}
+}
+
+func TestSpotDualPlaceLimitSkipsWhenQuoteBudgetExceeded(t *testing.T) {
+	exec := &fakeExecutor{
+		balance: core.Balance{
+			Base:  decimal.RequireFromString("10"),
+			Quote: decimal.RequireFromString("1000"),
+		},
+	}
+	s := NewSpotDual(
+		"BTCUSDT",
+		decimal.Zero,
+		decimal.RequireFromString("1.1"),
+		3,
+		1,
+		decimal.NewFromInt(1),
+		1,
+		core.Rules{},
+		nil,
+		exec,
+	)
+	s.anchor = decimal.NewFromInt(100)
+	s.minLevel = -3
+	s.maxLevel = 2
+	s.SetQuoteBudget(decimal.RequireFromString("50"))
+
+	if err := s.placeLimit(context.Background(), core.Buy, -1); err != nil {
+		t.Fatalf("placeLimit() error = %v", err)
+	}
+	if len(s.openOrders) != 0 {
+		t.Fatalf("open orders = %d, want 0 when quote budget insufficient", len(s.openOrders))
+	}
+}
+
+func TestSpotDualPlaceMarketBuyFailsWhenQuoteBudgetExceeded(t *testing.T) {
+	exec := &fakeExecutor{
+		balance: core.Balance{
+			Base:  decimal.RequireFromString("10"),
+			Quote: decimal.RequireFromString("1000"),
+		},
+	}
+	s := NewSpotDual(
+		"BTCUSDT",
+		decimal.Zero,
+		decimal.RequireFromString("1.1"),
+		3,
+		1,
+		decimal.NewFromInt(1),
+		1,
+		core.Rules{},
+		nil,
+		exec,
+	)
+	s.anchor = decimal.NewFromInt(100)
+	s.SetQuoteBudget(decimal.RequireFromString("50"))
+
+	err := s.placeMarketBuy(context.Background(), decimal.NewFromInt(1))
+	if err == nil {
+		t.Fatalf("placeMarketBuy() error = nil, want insufficient quote budget")
+	}
+	if !errors.Is(err, core.ErrInsufficientBalance) {
+		t.Fatalf("placeMarketBuy() error = %v, want errors.Is(_, ErrInsufficientBalance)", err)
+	}
+}
+
+func TestSpotDualInitFailsWhenBaseBudgetTooLow(t *testing.T) {
+	exec := &fakeExecutor{
+		balance: core.Balance{
+			Base:  decimal.Zero,
+			Quote: decimal.RequireFromString("1000000"),
+		},
+	}
+	s := NewSpotDual(
+		"BTCUSDT",
+		decimal.Zero,
+		decimal.RequireFromString("1.1"),
+		3,
+		2,
+		decimal.NewFromInt(1),
+		1,
+		core.Rules{},
+		nil,
+		exec,
+	)
+	s.SetBaseBudget(decimal.NewFromInt(1))
+
+	err := s.Init(context.Background(), decimal.NewFromInt(100))
+	if err == nil {
+		t.Fatalf("Init() error = nil, want base budget failure")
+	}
+	if !strings.Contains(err.Error(), "base budget too low for sell window") {
+		t.Fatalf("Init() error = %v, want base budget failure", err)
 	}
 }

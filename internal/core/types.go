@@ -46,14 +46,15 @@ type Order struct {
 }
 
 type Trade struct {
-	OrderID string
-	TradeID string
-	Symbol  string
-	Side    Side
-	Price   decimal.Decimal
-	Qty     decimal.Decimal
-	Status  OrderStatus
-	Time    time.Time
+	OrderID  string
+	TradeID  string
+	ClientID string
+	Symbol   string
+	Side     Side
+	Price    decimal.Decimal
+	Qty      decimal.Decimal
+	Status   OrderStatus
+	Time     time.Time
 }
 
 type Rules struct {
@@ -64,6 +65,10 @@ type Rules struct {
 }
 
 type Balance struct {
-	Base  decimal.Decimal
-	Quote decimal.Decimal
+	Base        decimal.Decimal
+	Quote       decimal.Decimal
+	BaseFree    decimal.Decimal
+	BaseLocked  decimal.Decimal
+	QuoteFree   decimal.Decimal
+	QuoteLocked decimal.Decimal
 }

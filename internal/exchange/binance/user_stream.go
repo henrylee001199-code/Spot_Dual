@@ -26,6 +26,7 @@ type executionReport struct {
 	EventTime       int64  `json:"E"`
 	Symbol          string `json:"s"`
 	OrderID         int64  `json:"i"`
+	ClientOrderID   string `json:"c"`
 	Side            string `json:"S"`
 	ExecutionType   string `json:"x"`
 	OrderStatus     string `json:"X"`
@@ -184,6 +185,9 @@ func (u *UserStream) Trades(ctx context.Context, symbol string) (<-chan core.Tra
 			if symbol != "" && msg.Symbol != symbol {
 				continue
 			}
+			if u.client != nil && !u.client.OwnsClientID(msg.ClientOrderID) {
+				continue
+			}
 			if msg.ExecutionType != "TRADE" {
 				continue
 			}
@@ -217,14 +221,15 @@ func (u *UserStream) Trades(ctx context.Context, symbol string) (<-chan core.Tra
 				tradeID = strconv.FormatInt(msg.TradeID, 10)
 			}
 			trade := core.Trade{
-				OrderID: strconv.FormatInt(msg.OrderID, 10),
-				TradeID: tradeID,
-				Symbol:  msg.Symbol,
-				Side:    core.Side(msg.Side),
-				Price:   price,
-				Qty:     qty,
-				Status:  core.OrderStatus(msg.OrderStatus),
-				Time:    time.UnixMilli(ts),
+				OrderID:  strconv.FormatInt(msg.OrderID, 10),
+				TradeID:  tradeID,
+				ClientID: msg.ClientOrderID,
+				Symbol:   msg.Symbol,
+				Side:     core.Side(msg.Side),
+				Price:    price,
+				Qty:      qty,
+				Status:   core.OrderStatus(msg.OrderStatus),
+				Time:     time.UnixMilli(ts),
 			}
 			select {
 			case trades <- trade:

@@ -14,6 +14,10 @@ grid:
   qty: "0.001" # 规则归一化前的下单数量
   min_qty_multiple: 1 # 最终数量下限 = min_qty * min_qty_multiple
 
+capital:
+  base_budget: "0" # 单实例可使用的 base 资产预算（0 表示不限制）
+  quote_budget: "0" # 单实例可使用的 quote 资产预算（0 表示不限制）
+
 state:
   dir: "state" # state/{mode}/{symbol}/{instance_id}，包含 state/open_orders/runtime_status
   lock_takeover: true # 上一进程异常退出时，尝试接管陈旧的 .instance.lock

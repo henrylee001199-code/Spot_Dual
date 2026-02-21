@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"time"
@@ -30,6 +31,8 @@ type SpotDual struct {
 	SellRatio        decimal.Decimal
 	RatioStep        decimal.Decimal
 	RatioQtyMultiple decimal.Decimal
+	BaseBudget       decimal.Decimal
+	QuoteBudget      decimal.Decimal
 	Levels           int
 	Shift            int
 	Qty              decimal.Decimal
@@ -133,6 +136,18 @@ func (s *SpotDual) SetRatioStep(step decimal.Decimal) {
 func (s *SpotDual) SetRatioQtyMultiple(v decimal.Decimal) {
 	if v.Cmp(decimal.Zero) > 0 {
 		s.RatioQtyMultiple = v
+	}
+}
+
+func (s *SpotDual) SetBaseBudget(v decimal.Decimal) {
+	if v.Cmp(decimal.Zero) >= 0 {
+		s.BaseBudget = v
+	}
+}
+
+func (s *SpotDual) SetQuoteBudget(v decimal.Decimal) {
+	if v.Cmp(decimal.Zero) >= 0 {
+		s.QuoteBudget = v
 	}
 }
 
@@ -247,11 +262,14 @@ func (s *SpotDual) baseBuyNeed(ctx context.Context, target decimal.Decimal) (dec
 	if target.Cmp(decimal.Zero) <= 0 {
 		return decimal.Zero, nil
 	}
+	if s.BaseBudget.Cmp(decimal.Zero) > 0 && target.Cmp(s.BaseBudget) > 0 {
+		return decimal.Zero, errors.New("base budget too low for sell window")
+	}
 	bal, err := s.executor.Balances(ctx)
 	if err != nil {
 		return decimal.Zero, err
 	}
-	need := target.Sub(bal.Base)
+	need := target.Sub(s.totalBaseWithinBudget(bal))
 	if need.Cmp(decimal.Zero) <= 0 {
 		return decimal.Zero, nil
 	}
@@ -738,6 +756,22 @@ func (s *SpotDual) placeLimitWithQtyMultiple(ctx context.Context, side core.Side
 		return err
 	}
 	order = norm
+	if side == core.Buy {
+		requiredQuote := order.Price.Mul(order.Qty)
+		if err := s.ensureQuoteBudget(ctx, requiredQuote); err != nil {
+			if isInsufficientBalanceError(err) {
+				s.alertImportant("place_order_skipped_insufficient_balance", map[string]string{
+					"side":  string(side),
+					"level": strconv.Itoa(idx),
+					"price": order.Price.String(),
+					"qty":   order.Qty.String(),
+					"err":   err.Error(),
+				})
+				return nil
+			}
+			return err
+		}
+	}
 	placed, err := s.executor.PlaceOrder(ctx, order)
 	if err != nil {
 		if isInsufficientBalanceError(err) {
@@ -777,6 +811,13 @@ func (s *SpotDual) placeMarketBuy(ctx context.Context, qty decimal.Decimal) erro
 		return err
 	}
 	order = norm
+	requiredQuote := order.Price.Mul(order.Qty)
+	if err := s.ensureQuoteBudget(ctx, requiredQuote); err != nil {
+		return err
+	}
+	if err := s.ensureBaseBudgetHeadroom(ctx, order.Qty); err != nil {
+		return err
+	}
 	placed, err := s.executor.PlaceOrder(ctx, order)
 	if err != nil {
 		return err
@@ -1073,15 +1114,114 @@ func (s *SpotDual) shiftBuyNeed(ctx context.Context, shift int) (decimal.Decimal
 	if err != nil {
 		return decimal.Zero, err
 	}
-	freeBase := bal.Base.Sub(s.lockedSellBase())
-	if freeBase.Cmp(decimal.Zero) < 0 {
-		freeBase = decimal.Zero
-	}
+	freeBase := s.freeBaseWithinBudget(bal)
 	need := required.Sub(freeBase)
 	if need.Cmp(decimal.Zero) <= 0 {
 		return decimal.Zero, nil
 	}
 	return s.roundQtyUp(need), nil
+}
+
+func (s *SpotDual) totalBaseWithinBudget(bal core.Balance) decimal.Decimal {
+	total := bal.Base
+	if total.Cmp(decimal.Zero) <= 0 && (bal.BaseFree.Cmp(decimal.Zero) > 0 || bal.BaseLocked.Cmp(decimal.Zero) > 0) {
+		total = bal.BaseFree.Add(bal.BaseLocked)
+	}
+	if total.Cmp(decimal.Zero) < 0 {
+		total = decimal.Zero
+	}
+	if s.BaseBudget.Cmp(decimal.Zero) > 0 && total.Cmp(s.BaseBudget) > 0 {
+		total = s.BaseBudget
+	}
+	return total
+}
+
+func (s *SpotDual) freeBaseWithinBudget(bal core.Balance) decimal.Decimal {
+	free := bal.BaseFree
+	if bal.BaseFree.Cmp(decimal.Zero) == 0 && bal.BaseLocked.Cmp(decimal.Zero) == 0 {
+		free = bal.Base
+	}
+	if free.Cmp(decimal.Zero) < 0 {
+		free = decimal.Zero
+	}
+	if s.BaseBudget.Cmp(decimal.Zero) > 0 {
+		capFree := s.BaseBudget.Sub(s.lockedSellBase())
+		if capFree.Cmp(decimal.Zero) < 0 {
+			capFree = decimal.Zero
+		}
+		if free.Cmp(capFree) > 0 {
+			free = capFree
+		}
+	}
+	return free
+}
+
+func (s *SpotDual) freeQuoteWithinBudget(bal core.Balance) decimal.Decimal {
+	free := bal.QuoteFree
+	if bal.QuoteFree.Cmp(decimal.Zero) == 0 && bal.QuoteLocked.Cmp(decimal.Zero) == 0 {
+		free = bal.Quote
+	}
+	if free.Cmp(decimal.Zero) < 0 {
+		free = decimal.Zero
+	}
+	if s.QuoteBudget.Cmp(decimal.Zero) > 0 {
+		capFree := s.QuoteBudget.Sub(s.lockedBuyQuote())
+		if capFree.Cmp(decimal.Zero) < 0 {
+			capFree = decimal.Zero
+		}
+		if free.Cmp(capFree) > 0 {
+			free = capFree
+		}
+	}
+	return free
+}
+
+func (s *SpotDual) ensureQuoteBudget(ctx context.Context, required decimal.Decimal) error {
+	if required.Cmp(decimal.Zero) <= 0 || s.QuoteBudget.Cmp(decimal.Zero) <= 0 {
+		return nil
+	}
+	bal, err := s.executor.Balances(ctx)
+	if err != nil {
+		return err
+	}
+	freeQuote := s.freeQuoteWithinBudget(bal)
+	if freeQuote.Cmp(required) >= 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: quote budget", core.ErrInsufficientBalance)
+}
+
+func (s *SpotDual) ensureBaseBudgetHeadroom(ctx context.Context, buyQty decimal.Decimal) error {
+	if buyQty.Cmp(decimal.Zero) <= 0 || s.BaseBudget.Cmp(decimal.Zero) <= 0 {
+		return nil
+	}
+	bal, err := s.executor.Balances(ctx)
+	if err != nil {
+		return err
+	}
+	total := bal.Base
+	if total.Cmp(decimal.Zero) <= 0 && (bal.BaseFree.Cmp(decimal.Zero) > 0 || bal.BaseLocked.Cmp(decimal.Zero) > 0) {
+		total = bal.BaseFree.Add(bal.BaseLocked)
+	}
+	headroom := s.BaseBudget.Sub(total)
+	if headroom.Cmp(decimal.Zero) < 0 {
+		headroom = decimal.Zero
+	}
+	if headroom.Cmp(buyQty) >= 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: base budget", core.ErrInsufficientBalance)
+}
+
+func (s *SpotDual) lockedBuyQuote() decimal.Decimal {
+	total := decimal.Zero
+	for _, ord := range s.openOrders {
+		if ord.Side != core.Buy {
+			continue
+		}
+		total = total.Add(ord.Price.Mul(ord.Qty))
+	}
+	return total
 }
 
 func (s *SpotDual) lockedSellBase() decimal.Decimal {

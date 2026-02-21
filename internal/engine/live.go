@@ -208,6 +208,9 @@ func (r *LiveRunner) runOnce(ctx context.Context, reconnect bool, seen *seenTrac
 			if !ok {
 				return errors.New("user stream closed")
 			}
+			if !r.ownsClientID(trade.ClientID) {
+				continue
+			}
 			dup, err := r.shouldSkipTrade(trade, seen, time.Now().UTC())
 			if err != nil {
 				return fmt.Errorf("%w: trade dedup check: %v", ErrFatalLocal, err)
@@ -295,7 +298,7 @@ func (r *LiveRunner) loadPersistedForResync(reconnect bool) ([]core.Order, bool,
 	if !openOrdersOK || len(openOrders.Orders) == 0 {
 		return nil, false, nil
 	}
-	return openOrders.Orders, false, nil
+	return r.filterOwnedOrders(openOrders.Orders), false, nil
 }
 
 func (r *LiveRunner) resync(ctx context.Context, price decimal.Decimal, seen *seenTracker, persisted []core.Order, allowPersistedReconcile bool) error {
@@ -306,13 +309,15 @@ func (r *LiveRunner) resync(ctx context.Context, price decimal.Decimal, seen *se
 		})
 		return err
 	}
+	open = r.filterOwnedOrders(open)
 
 	if allowPersistedReconcile {
+		persisted = r.filterOwnedOrders(persisted)
 		if len(persisted) == 0 && r.Store != nil {
 			if orders, ok, err := r.Store.LoadOpenOrders(); err != nil {
 				return fmt.Errorf("%w: load open orders in resync: %v", ErrFatalLocal, err)
 			} else if ok && len(orders) > 0 {
-				persisted = orders
+				persisted = r.filterOwnedOrders(orders)
 			}
 		}
 
@@ -347,6 +352,9 @@ func (r *LiveRunner) resync(ctx context.Context, price decimal.Decimal, seen *se
 }
 
 func (r *LiveRunner) reconcileMissing(ctx context.Context, open []core.Order, persisted []core.Order, seen *seenTracker) ([]core.Order, error) {
+	open = r.filterOwnedOrders(open)
+	persisted = r.filterOwnedOrders(persisted)
+
 	openByID := make(map[string]struct{}, len(open))
 	for _, ord := range open {
 		if ord.ID != "" {
@@ -383,6 +391,9 @@ func (r *LiveRunner) reconcileMissing(ctx context.Context, open []core.Order, pe
 				"exchange_response": err.Error(),
 			})
 			return open, err
+		}
+		if !r.ownsClientID(status.Order.ClientID) {
+			continue
 		}
 		switch status.Order.Status {
 		case core.OrderNew, core.OrderPartiallyFilled:
@@ -650,14 +661,15 @@ func tradeFromOrder(status binance.OrderQuery, fallback core.Order) core.Trade {
 		tradeID = "reconcile-" + order.ID
 	}
 	return core.Trade{
-		OrderID: order.ID,
-		TradeID: tradeID,
-		Symbol:  order.Symbol,
-		Side:    order.Side,
-		Price:   price,
-		Qty:     qty,
-		Status:  order.Status,
-		Time:    ts,
+		OrderID:  order.ID,
+		TradeID:  tradeID,
+		ClientID: order.ClientID,
+		Symbol:   order.Symbol,
+		Side:     order.Side,
+		Price:    price,
+		Qty:      qty,
+		Status:   order.Status,
+		Time:     ts,
 	}
 }
 
@@ -716,4 +728,25 @@ func (r *LiveRunner) recordTradeLedger(trade core.Trade) error {
 		return nil
 	}
 	return r.Store.RecordTradeLedgerKey(ledgerKey, trade.Time)
+}
+
+func (r *LiveRunner) ownsClientID(clientID string) bool {
+	if r.Exchange == nil {
+		return true
+	}
+	return r.Exchange.OwnsClientID(clientID)
+}
+
+func (r *LiveRunner) filterOwnedOrders(orders []core.Order) []core.Order {
+	if len(orders) == 0 {
+		return nil
+	}
+	out := make([]core.Order, 0, len(orders))
+	for _, ord := range orders {
+		if !r.ownsClientID(ord.ClientID) {
+			continue
+		}
+		out = append(out, ord)
+	}
+	return out
 }

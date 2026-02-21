@@ -135,6 +135,8 @@ cp config/config.example.yaml config/config.yaml
 - `grid.qty`：基础下单数量（后续会经过规则归一化）
 - `grid.min_qty_multiple`：最小数量倍数保护
 - `grid.stop_price`：大于该价格时策略停止（0=禁用）
+- `capital.base_budget`：单实例可用的 base 资产预算（0=不限制）
+- `capital.quote_budget`：单实例可用的 quote 资产预算（0=不限制）
 
 风控/运行：
 

@@ -98,3 +98,36 @@ func TestApplySpotDualTuningSetsRatioQtyMultiple(t *testing.T) {
 		t.Fatalf("ratio_qty_multiple = %s, want 1.2", strat.RatioQtyMultiple.String())
 	}
 }
+
+func TestApplySpotDualTuningSetsCapitalBudget(t *testing.T) {
+	strat := strategy.NewSpotDual(
+		"BTCUSDT",
+		decimal.Zero,
+		decimal.RequireFromString("1.01"),
+		20,
+		10,
+		decimal.RequireFromString("0.001"),
+		1,
+		core.Rules{},
+		nil,
+		nil,
+	)
+	cfg := config.Config{
+		Grid: config.GridConfig{
+			SellRatio: config.Decimal{Decimal: decimal.RequireFromString("1.01")},
+		},
+		Capital: config.CapitalConfig{
+			BaseBudget:  config.Decimal{Decimal: decimal.RequireFromString("1.5")},
+			QuoteBudget: config.Decimal{Decimal: decimal.RequireFromString("200")},
+		},
+	}
+
+	applySpotDualTuning(strat, cfg)
+
+	if !strat.BaseBudget.Equal(decimal.RequireFromString("1.5")) {
+		t.Fatalf("base_budget = %s, want 1.5", strat.BaseBudget.String())
+	}
+	if !strat.QuoteBudget.Equal(decimal.RequireFromString("200")) {
+		t.Fatalf("quote_budget = %s, want 200", strat.QuoteBudget.String())
+	}
+}

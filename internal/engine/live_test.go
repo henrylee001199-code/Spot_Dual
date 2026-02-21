@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -313,6 +314,117 @@ func TestLiveRunnerProcessesPartialAndFinalTrades(t *testing.T) {
 	assertNoAsyncErr(t, asyncErrs)
 }
 
+func TestLiveRunnerIgnoresNonOwnedTradeEvents(t *testing.T) {
+	asyncErrs := make(chan error, 16)
+
+	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/ticker/price":
+			_ = writeJSON(w, http.StatusOK, map[string]string{
+				"symbol": "BTCUSDT",
+				"price":  "100",
+			})
+		case "/api/v3/openOrders":
+			_ = writeJSON(w, http.StatusOK, []any{})
+		default:
+			recordAsyncErr(asyncErrs, fmt.Errorf("unexpected REST path: %s", r.URL.Path))
+			_ = writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		}
+	}))
+	defer rest.Close()
+
+	ws := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{
+			CheckOrigin: func(*http.Request) bool { return true },
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			recordAsyncErr(asyncErrs, err)
+			return
+		}
+		defer conn.Close()
+
+		reqID, err := readWSReqID(conn)
+		if err != nil {
+			recordAsyncErr(asyncErrs, err)
+			return
+		}
+		if err := writeWSResponse(conn, reqID); err != nil {
+			recordAsyncErr(asyncErrs, err)
+			return
+		}
+
+		if err := writeExecutionReport(conn, executionReportPayload{
+			OrderID:       33001,
+			TradeID:       43001,
+			ClientOrderID: "other-33001",
+			Side:          "BUY",
+			Status:        "FILLED",
+			OrderQty:      "1",
+			LastQty:       "1",
+			LastPrice:     "100",
+			CumQty:        "1",
+		}); err != nil {
+			recordAsyncErr(asyncErrs, err)
+			return
+		}
+		if err := writeExecutionReport(conn, executionReportPayload{
+			OrderID:       33002,
+			TradeID:       43002,
+			ClientOrderID: "test-33002",
+			Side:          "BUY",
+			Status:        "FILLED",
+			OrderQty:      "1",
+			LastQty:       "1",
+			LastPrice:     "100",
+			CumQty:        "1",
+		}); err != nil {
+			recordAsyncErr(asyncErrs, err)
+		}
+	}))
+	defer ws.Close()
+
+	client := binance.NewClientWithOptions(binance.Options{
+		APIKey:            "k",
+		APISecret:         "s",
+		RestBaseURL:       rest.URL,
+		WSBaseURL:         httpToWS(ws.URL),
+		Symbol:            "BTCUSDT",
+		ClientOrderPrefix: "test",
+		UserStreamAuth:    "signature",
+		HTTPTimeoutSec:    3,
+	})
+	defer client.Close()
+
+	strat := &liveStrategySpy{stopAfterFill: 1}
+	runner := LiveRunner{
+		Exchange: client,
+		Strategy: strat,
+		Symbol:   "BTCUSDT",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := runner.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	_, _, fills := strat.stats()
+	if len(fills) != 1 {
+		t.Fatalf("fill calls = %d, want 1", len(fills))
+	}
+	if fills[0].OrderID != "33002" {
+		t.Fatalf("fill order_id = %s, want 33002", fills[0].OrderID)
+	}
+	if fills[0].ClientID != "test-33002" {
+		t.Fatalf("fill client_id = %s, want test-33002", fills[0].ClientID)
+	}
+
+	assertNoAsyncErr(t, asyncErrs)
+}
+
 func TestLiveRunOnceExitsCleanlyWhenInitialResyncStopsStrategy(t *testing.T) {
 	asyncErrs := make(chan error, 16)
 
@@ -397,7 +509,7 @@ func TestLiveReconcileMissingAppliesFilledOnlyOnce(t *testing.T) {
 			_ = writeJSON(w, http.StatusOK, map[string]any{
 				"symbol":              "BTCUSDT",
 				"orderId":             50001,
-				"clientOrderId":       "cid-50001",
+				"clientOrderId":       "test-50001",
 				"price":               "100",
 				"origQty":             "1",
 				"executedQty":         "1",
@@ -442,7 +554,7 @@ func TestLiveReconcileMissingAppliesFilledOnlyOnce(t *testing.T) {
 	persisted := []core.Order{
 		{
 			ID:       "50001",
-			ClientID: "cid-50001",
+			ClientID: "test-50001",
 			Symbol:   "BTCUSDT",
 			Side:     core.Buy,
 			Type:     core.Limit,
@@ -482,7 +594,7 @@ func TestLiveReconcileMissingAutoHandlesClosedPartialFill(t *testing.T) {
 			_ = writeJSON(w, http.StatusOK, map[string]any{
 				"symbol":              "BTCUSDT",
 				"orderId":             50002,
-				"clientOrderId":       "cid-50002",
+				"clientOrderId":       "test-50002",
 				"price":               "100",
 				"origQty":             "1",
 				"executedQty":         "0.4",
@@ -527,7 +639,7 @@ func TestLiveReconcileMissingAutoHandlesClosedPartialFill(t *testing.T) {
 	persisted := []core.Order{
 		{
 			ID:       "50002",
-			ClientID: "cid-50002",
+			ClientID: "test-50002",
 			Symbol:   "BTCUSDT",
 			Side:     core.Sell,
 			Type:     core.Limit,
@@ -1303,23 +1415,29 @@ func TestLiveRunnerRecordTradeLedgerMakesTradeSkippableAcrossRestart(t *testing.
 }
 
 type executionReportPayload struct {
-	OrderID   int64
-	TradeID   int64
-	Side      string
-	Status    string
-	OrderQty  string
-	LastQty   string
-	LastPrice string
-	CumQty    string
+	OrderID       int64
+	TradeID       int64
+	ClientOrderID string
+	Side          string
+	Status        string
+	OrderQty      string
+	LastQty       string
+	LastPrice     string
+	CumQty        string
 }
 
 func writeExecutionReport(conn *websocket.Conn, p executionReportPayload) error {
 	ts := time.Now().UTC().UnixMilli()
+	clientOrderID := p.ClientOrderID
+	if clientOrderID == "" {
+		clientOrderID = "test-" + strconv.FormatInt(p.OrderID, 10)
+	}
 	msg := map[string]any{
 		"e": "executionReport",
 		"E": ts,
 		"s": "BTCUSDT",
 		"i": p.OrderID,
+		"c": clientOrderID,
 		"S": p.Side,
 		"x": "TRADE",
 		"X": p.Status,

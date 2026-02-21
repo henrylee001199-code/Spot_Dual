@@ -166,13 +166,22 @@ func (s *SimExchange) OpenOrders(ctx context.Context, symbol string) ([]core.Ord
 
 func (s *SimExchange) Balances(ctx context.Context) (core.Balance, error) {
 	return core.Balance{
-		Base:  s.balanceFree.Base.Add(s.baseLocked),
-		Quote: s.balanceFree.Quote.Add(s.quoteLocked),
+		Base:        s.balanceFree.Base.Add(s.baseLocked),
+		Quote:       s.balanceFree.Quote.Add(s.quoteLocked),
+		BaseFree:    s.balanceFree.Base,
+		BaseLocked:  s.baseLocked,
+		QuoteFree:   s.balanceFree.Quote,
+		QuoteLocked: s.quoteLocked,
 	}, nil
 }
 
 func (s *SimExchange) FreeBalances() core.Balance {
-	return s.balanceFree
+	return core.Balance{
+		Base:      s.balanceFree.Base,
+		Quote:     s.balanceFree.Quote,
+		BaseFree:  s.balanceFree.Base,
+		QuoteFree: s.balanceFree.Quote,
+	}
 }
 
 func (s *SimExchange) MarketBuyStats() (int, decimal.Decimal) {

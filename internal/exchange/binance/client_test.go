@@ -31,6 +31,89 @@ func TestNormalizeClientOrderPrefix(t *testing.T) {
 	}
 }
 
+func TestOwnsClientID(t *testing.T) {
+	c := NewClientWithOptions(Options{ClientOrderPrefix: "bot1"})
+	cases := []struct {
+		clientID string
+		want     bool
+	}{
+		{clientID: "bot1", want: true},
+		{clientID: "bot1-abc", want: true},
+		{clientID: "bot10-abc", want: false},
+		{clientID: "manual-abc", want: false},
+		{clientID: "", want: false},
+	}
+	for _, tc := range cases {
+		if got := c.OwnsClientID(tc.clientID); got != tc.want {
+			t.Fatalf("OwnsClientID(%q)=%v, want %v", tc.clientID, got, tc.want)
+		}
+	}
+}
+
+func TestOpenOrdersFiltersByClientOrderPrefix(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/openOrders" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"symbol":        "BTCUSDT",
+				"orderId":       1001,
+				"clientOrderId": "bot1-a",
+				"price":         "100",
+				"origQty":       "1",
+				"executedQty":   "0",
+				"side":          "BUY",
+				"type":          "LIMIT",
+			},
+			{
+				"symbol":        "BTCUSDT",
+				"orderId":       1002,
+				"clientOrderId": "bot10-a",
+				"price":         "101",
+				"origQty":       "1",
+				"executedQty":   "0",
+				"side":          "SELL",
+				"type":          "LIMIT",
+			},
+			{
+				"symbol":        "BTCUSDT",
+				"orderId":       1003,
+				"clientOrderId": "manual-a",
+				"price":         "102",
+				"origQty":       "1",
+				"executedQty":   "0",
+				"side":          "SELL",
+				"type":          "LIMIT",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithOptions(Options{
+		APIKey:            "k",
+		APISecret:         "s",
+		RestBaseURL:       srv.URL,
+		Symbol:            "BTCUSDT",
+		ClientOrderPrefix: "bot1",
+	})
+
+	orders, err := c.OpenOrders(context.Background(), "BTCUSDT")
+	if err != nil {
+		t.Fatalf("OpenOrders() error = %v", err)
+	}
+	if len(orders) != 1 {
+		t.Fatalf("OpenOrders() count = %d, want 1", len(orders))
+	}
+	if orders[0].ID != "1001" {
+		t.Fatalf("OpenOrders() id = %q, want 1001", orders[0].ID)
+	}
+	if orders[0].ClientID != "bot1-a" {
+		t.Fatalf("OpenOrders() client_id = %q, want bot1-a", orders[0].ClientID)
+	}
+}
+
 func TestParseAPIError(t *testing.T) {
 	err := parseAPIError(http.StatusBadRequest, []byte(`{"code":-2010,"msg":"Duplicate order sent."}`))
 	apiErr, ok := AsAPIError(err)

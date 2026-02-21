@@ -37,6 +37,7 @@ type Config struct {
 	Symbol         string               `yaml:"symbol"`
 	InstanceID     string               `yaml:"instance_id"`
 	Grid           GridConfig           `yaml:"grid"`
+	Capital        CapitalConfig        `yaml:"capital"`
 	Backtest       BacktestConfig       `yaml:"backtest"`
 	Exchange       ExchangeConfig       `yaml:"exchange"`
 	State          StateConfig          `yaml:"state"`
@@ -55,6 +56,11 @@ type GridConfig struct {
 	Mode             GridMode `yaml:"mode"`
 	Qty              Decimal  `yaml:"qty"`
 	MinQtyMultiple   int64    `yaml:"min_qty_multiple"`
+}
+
+type CapitalConfig struct {
+	BaseBudget  Decimal `yaml:"base_budget"`
+	QuoteBudget Decimal `yaml:"quote_budget"`
 }
 
 type BacktestConfig struct {
@@ -316,6 +322,12 @@ func (c Config) Validate() error {
 	}
 	if c.Grid.MinQtyMultiple < 1 {
 		return fmt.Errorf("min_qty_multiple must be >= 1")
+	}
+	if c.Capital.BaseBudget.Cmp(decimal.Zero) < 0 {
+		return fmt.Errorf("capital base_budget must be >= 0")
+	}
+	if c.Capital.QuoteBudget.Cmp(decimal.Zero) < 0 {
+		return fmt.Errorf("capital quote_budget must be >= 0")
 	}
 	if c.Backtest.Fees.MakerRate.Cmp(decimal.Zero) < 0 {
 		return fmt.Errorf("backtest fees.maker_rate must be >= 0")

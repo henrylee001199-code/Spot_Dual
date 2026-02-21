@@ -208,4 +208,6 @@ func applySpotDualTuning(strat *strategy.SpotDual, cfg config.Config) {
 		strat.SetRatioStep(cfg.Grid.RatioStep.Decimal)
 	}
 	strat.SetRatioQtyMultiple(cfg.Grid.RatioQtyMultiple.Decimal)
+	strat.SetBaseBudget(cfg.Capital.BaseBudget.Decimal)
+	strat.SetQuoteBudget(cfg.Capital.QuoteBudget.Decimal)
 }
