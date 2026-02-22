@@ -58,8 +58,8 @@ backtest:
     qty_step: "0"
 
 exchange:
-  api_key: "YOUR_TESTNET_API_KEY"
-  api_secret: "YOUR_TESTNET_API_SECRET"
+  api_key: "REPLACE_WITH_API_KEY"
+  api_secret: "REPLACE_WITH_API_SECRET"
   # 当前仓库使用现货端点。
   # 若你运行的是合约分支，请切换到 fapi 端点。
   rest_base_url: "https://testnet.binance.vision"

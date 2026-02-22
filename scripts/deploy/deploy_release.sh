@@ -26,6 +26,7 @@ fi
 APP_USER="${APP_USER:-spotdual}"
 APP_GROUP="${APP_GROUP:-spotdual}"
 APP_ROOT="${APP_ROOT:-/opt/spot-dual}"
+CURRENT_LINK="${APP_ROOT}/current"
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
@@ -47,9 +48,24 @@ rm -rf "${DEST_DIR}"
 mkdir -p "${DEST_DIR}"
 cp -a "${EXTRACTED_DIR}/." "${DEST_DIR}/"
 
-ln -sfn "${DEST_DIR}" "${APP_ROOT}/current"
+# 兼容历史错误：若 current 被误建为目录，则先清理/备份，再切换为软链接。
+if [[ -L "${CURRENT_LINK}" ]]; then
+  rm -f "${CURRENT_LINK}"
+elif [[ -d "${CURRENT_LINK}" ]]; then
+  if [[ -n "$(find "${CURRENT_LINK}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+    backup_dir="${APP_ROOT}/current.dir.backup.$(date +%Y%m%d_%H%M%S)"
+    mv "${CURRENT_LINK}" "${backup_dir}"
+    echo "检测到 current 为非空目录，已备份到: ${backup_dir}"
+  else
+    rmdir "${CURRENT_LINK}"
+  fi
+elif [[ -e "${CURRENT_LINK}" ]]; then
+  rm -f "${CURRENT_LINK}"
+fi
+
+ln -s "${DEST_DIR}" "${CURRENT_LINK}"
 chown -R "${APP_USER}:${APP_GROUP}" "${DEST_DIR}"
-chown -h "${APP_USER}:${APP_GROUP}" "${APP_ROOT}/current"
+chown -h "${APP_USER}:${APP_GROUP}" "${CURRENT_LINK}"
 
 echo "发布完成："
 echo "  release=${DEST_DIR}"

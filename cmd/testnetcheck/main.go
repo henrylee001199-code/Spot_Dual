@@ -117,20 +117,35 @@ func main() {
 		if marketLoaded {
 			return nil
 		}
-		var err error
-		rules, err = client.GetRules(ctx, cfg.Symbol)
+		var (
+			loadedRules core.Rules
+			loadedPrice decimal.Decimal
+			loadedQuote decimal.Decimal
+		)
+		err := retryWithBackoff(ctx, 3, 700*time.Millisecond, func() error {
+			r, err := client.GetRules(ctx, cfg.Symbol)
+			if err != nil {
+				return err
+			}
+			p, err := client.TickerPrice(ctx, cfg.Symbol)
+			if err != nil {
+				return err
+			}
+			bal, err := client.Balances(ctx)
+			if err != nil {
+				return err
+			}
+			loadedRules = r
+			loadedPrice = p
+			loadedQuote = bal.Quote
+			return nil
+		})
 		if err != nil {
 			return err
 		}
-		lastPrice, err = client.TickerPrice(ctx, cfg.Symbol)
-		if err != nil {
-			return err
-		}
-		bal, err := client.Balances(ctx)
-		if err != nil {
-			return err
-		}
-		lastQuote = bal.Quote
+		rules = loadedRules
+		lastPrice = loadedPrice
+		lastQuote = loadedQuote
 		marketLoaded = true
 		return nil
 	}
@@ -178,75 +193,102 @@ func main() {
 			if lastPrice.Cmp(decimal.Zero) <= 0 {
 				return "", errors.New("missing ticker price")
 			}
-			price := lastPrice.Mul(decimal.RequireFromString("0.5"))
-			if rules.PriceTick.Cmp(decimal.Zero) > 0 {
-				price = core.RoundDown(price, rules.PriceTick)
+			// 选择更接近市价的探测价格，避免触发 PERCENT_PRICE_BY_SIDE。
+			probes := []decimal.Decimal{
+				decimal.RequireFromString("0.995"),
+				decimal.RequireFromString("0.998"),
+				decimal.RequireFromString("1.000"),
 			}
-			if price.Cmp(decimal.Zero) <= 0 {
-				return "", errors.New("calculated order price <= 0")
-			}
-			qty, err := buildTinyLimitQty(cfg, rules, price)
-			if err != nil {
-				return "", err
-			}
-			notional := price.Mul(qty)
-			if lastQuote.Cmp(notional) < 0 {
-				return "", fmt.Errorf("insufficient quote for check order: need=%s have=%s", notional.String(), lastQuote.String())
-			}
-
-			order := core.Order{
-				Symbol: cfg.Symbol,
-				Side:   core.Buy,
-				Type:   core.Limit,
-				Price:  price,
-				Qty:    qty,
-			}
-			placed, err := client.PlaceOrder(ctx, order)
-			if err != nil {
-				return "", err
-			}
-			if placed.ID == "" {
-				return "", errors.New("empty order id")
-			}
-			placedID = placed.ID
-			placedCID = placed.ClientID
-			placedSide = placed.Side
-
-			query, err := client.QueryOrder(ctx, cfg.Symbol, placed.ID, placed.ClientID)
-			if err != nil {
-				return "", err
-			}
-
-			open, err := client.OpenOrders(ctx, cfg.Symbol)
-			if err != nil {
-				return "", err
-			}
-			foundInOpen := false
-			for _, ord := range open {
-				if ord.ID == placed.ID {
-					foundInOpen = true
-					break
+			var lastProbeErr error
+			for _, probe := range probes {
+				price := lastPrice.Mul(probe)
+				if rules.PriceTick.Cmp(decimal.Zero) > 0 {
+					price = core.RoundDown(price, rules.PriceTick)
 				}
-			}
-
-			status := string(query.Order.Status)
-			switch query.Order.Status {
-			case core.OrderNew, core.OrderPartiallyFilled:
-				if err := client.CancelOrder(ctx, cfg.Symbol, placed.ID); err != nil {
-					return "", fmt.Errorf("cancel order failed: %w", err)
+				if price.Cmp(decimal.Zero) <= 0 {
+					continue
 				}
-				time.Sleep(400 * time.Millisecond)
-				queryAfter, err := client.QueryOrder(ctx, cfg.Symbol, placed.ID, placed.ClientID)
-				if err == nil {
-					status = string(queryAfter.Order.Status)
+				qty, err := buildTinyLimitQty(cfg, rules, price)
+				if err != nil {
+					return "", err
 				}
-			case core.OrderFilled:
-				// 对于远低于市价的订单，出现 FILLED 虽然不常见，但在生命周期检查中可接受。
-			default:
-				// 保留当前状态用于报告输出
-			}
+				notional := price.Mul(qty)
+				if lastQuote.Cmp(notional) < 0 {
+					return "", fmt.Errorf("insufficient quote for check order: need=%s have=%s", notional.String(), lastQuote.String())
+				}
 
-			return fmt.Sprintf("id=%s clientId=%s side=%s qty=%s price=%s status=%s foundInOpen=%t", placedID, placedCID, placedSide, qty.String(), price.String(), status, foundInOpen), nil
+				order := core.Order{
+					Symbol: cfg.Symbol,
+					Side:   core.Buy,
+					Type:   core.Limit,
+					Price:  price,
+					Qty:    qty,
+				}
+				placed, err := client.PlaceOrder(ctx, order)
+				if err != nil {
+					lastProbeErr = err
+					if isPercentPriceBySideError(err) {
+						continue
+					}
+					return "", err
+				}
+				if placed.ID == "" {
+					return "", errors.New("empty order id")
+				}
+				placedID = placed.ID
+				placedCID = placed.ClientID
+				placedSide = placed.Side
+
+				query, err := client.QueryOrder(ctx, cfg.Symbol, placed.ID, placed.ClientID)
+				if err != nil {
+					return "", err
+				}
+
+				open, err := client.OpenOrders(ctx, cfg.Symbol)
+				if err != nil {
+					return "", err
+				}
+				foundInOpen := false
+				for _, ord := range open {
+					if ord.ID == placed.ID {
+						foundInOpen = true
+						break
+					}
+				}
+
+				status := string(query.Order.Status)
+				switch query.Order.Status {
+				case core.OrderNew, core.OrderPartiallyFilled:
+					if err := client.CancelOrder(ctx, cfg.Symbol, placed.ID); err != nil {
+						return "", fmt.Errorf("cancel order failed: %w", err)
+					}
+					time.Sleep(400 * time.Millisecond)
+					queryAfter, err := client.QueryOrder(ctx, cfg.Symbol, placed.ID, placed.ClientID)
+					if err == nil {
+						status = string(queryAfter.Order.Status)
+					}
+				case core.OrderFilled:
+					// 接近市价时，出现 FILLED 也视为生命周期正常。
+				default:
+					// 其他状态按原样记录。
+				}
+
+				return fmt.Sprintf(
+					"id=%s clientId=%s side=%s qty=%s price=%s probe=%s status=%s foundInOpen=%t",
+					placedID,
+					placedCID,
+					placedSide,
+					qty.String(),
+					price.String(),
+					probe.String(),
+					status,
+					foundInOpen,
+				), nil
+			}
+			if lastProbeErr != nil {
+				return "", fmt.Errorf("all lifecycle probes failed: %w", lastProbeErr)
+			}
+			return "", errors.New("all lifecycle probes skipped")
 		})
 	}
 
@@ -288,8 +330,8 @@ func main() {
 		run("user_stream_reconnect", func() (string, error) {
 			okRounds := 0
 			for i := 0; i < 2; i++ {
-				roundCtx, roundCancel := context.WithTimeout(ctx, 5*time.Second)
-				stream, err := client.NewUserStream(roundCtx, time.Duration(cfg.Exchange.UserStreamKeepaliveSec)*time.Second)
+				roundCtx, roundCancel := context.WithTimeout(ctx, 12*time.Second)
+				stream, err := newUserStreamWithRetry(roundCtx, client, time.Duration(cfg.Exchange.UserStreamKeepaliveSec)*time.Second, 2)
 				if err != nil {
 					roundCancel()
 					return "", fmt.Errorf("round %d subscribe failed: %w", i+1, err)
@@ -603,6 +645,75 @@ func roundQtyUp(qty, step decimal.Decimal) decimal.Decimal {
 		return qty
 	}
 	return qty.Div(step).Ceil().Mul(step)
+}
+
+func isPercentPriceBySideError(err error) bool {
+	if !binance.IsAPIErrorCode(err, -1013) {
+		return false
+	}
+	apiErr, ok := binance.AsAPIError(err)
+	if !ok {
+		return false
+	}
+	msg := strings.ToUpper(strings.TrimSpace(apiErr.Msg))
+	return strings.Contains(msg, "PERCENT_PRICE_BY_SIDE")
+}
+
+func newUserStreamWithRetry(ctx context.Context, client *binance.Client, keepalive time.Duration, attempts int) (*binance.UserStream, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		stream, err := client.NewUserStream(ctx, keepalive)
+		if err == nil {
+			return stream, nil
+		}
+		lastErr = err
+		if i == attempts-1 {
+			break
+		}
+		backoff := time.Duration(i+1) * 500 * time.Millisecond
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("subscribe failed")
+	}
+	return nil, lastErr
+}
+
+func retryWithBackoff(ctx context.Context, attempts int, baseDelay time.Duration, fn func() error) error {
+	if attempts < 1 {
+		attempts = 1
+	}
+	if baseDelay <= 0 {
+		baseDelay = 500 * time.Millisecond
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if err := fn(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if i == attempts-1 {
+			break
+		}
+		delay := time.Duration(i+1) * baseDelay
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("retry failed")
+	}
+	return lastErr
 }
 
 func printSummary(r report) {

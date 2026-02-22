@@ -15,6 +15,10 @@ DIST_DIR="${ROOT_DIR}/dist"
 PKG_DIR="${DIST_DIR}/${PACKAGE_NAME}"
 ARCHIVE_PATH="${DIST_DIR}/${PACKAGE_NAME}.tar.gz"
 
+# 避免 macOS 扩展属性进入 tar，减少 Linux 解压告警与 ._ 文件噪音。
+export COPYFILE_DISABLE=1
+export COPY_EXTENDED_ATTRIBUTES_DISABLE=1
+
 echo "[1/4] 运行测试"
 cd "${ROOT_DIR}"
 "${GO_CMD}" test ./...
@@ -60,6 +64,8 @@ if [[ -d "${ROOT_DIR}/scripts/deploy" ]]; then
   cp -a "${ROOT_DIR}/scripts/deploy/." "${PKG_DIR}/scripts/deploy/"
   find "${PKG_DIR}/scripts/deploy" -type f -name "*.sh" -exec chmod +x {} \;
 fi
+
+find "${PKG_DIR}" -type f -name '._*' -delete
 
 (cd "${PKG_DIR}" && shasum -a 256 bin/gridbot bin/testnetcheck config/config.yaml > SHA256SUMS)
 

@@ -35,10 +35,18 @@ fi
 mkdir -p \
   "${APP_ROOT}/releases" \
   "${APP_ROOT}/shared" \
-  "${APP_ROOT}/current" \
   "${ETC_ROOT}/instances" \
   "${DATA_ROOT}/state" \
   "${LOG_ROOT}"
+
+# current 应由发布脚本维护为软链接；避免预建目录导致 ln -sfn 写入错误层级。
+if [[ -d "${APP_ROOT}/current" && ! -L "${APP_ROOT}/current" ]]; then
+  if [[ -z "$(find "${APP_ROOT}/current" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+    rmdir "${APP_ROOT}/current"
+  else
+    echo "警告: 检测到 ${APP_ROOT}/current 为非空目录，请先手动迁移后再发布。"
+  fi
+fi
 
 touch "${LOG_ROOT}/gridbot.log"
 
